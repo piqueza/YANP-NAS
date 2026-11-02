@@ -1,0 +1,35 @@
+[Unit]
+Description=YANP Nas privileged management agent
+After=mariadb.service network.target yanp-firewall.service yanp-firewall-guard.service
+Requires=mariadb.service
+Wants=yanp-firewall.service yanp-firewall-guard.service
+
+[Service]
+Type=simple
+User=root
+Group=yanp-web
+WorkingDirectory=/opt/yanp-nas
+ExecStart=/usr/bin/python3 -m agent.main
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=yanp-nas
+RuntimeDirectoryMode=0750
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+LimitNOFILE=4096
+TimeoutStopSec=30
+KillMode=control-group
+# Device and filesystem access is necessary for native mount/SMART/ACL operations.
+# APT and useradd also need writes under /etc, /var and /usr. Do not add
+# PrivateDevices or ProtectSystem=strict without a reviewed privilege split.
+
+[Install]
+WantedBy=multi-user.target

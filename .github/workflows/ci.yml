@@ -1,0 +1,36 @@
+name: Native Linux checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  checks:
+    # Hosted VM, no containers. Deployment targets Debian 13.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install native test dependencies
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-pymysql php-cli php-mysql apache2 libapache2-mod-php mariadb-server samba rsync acl ntfs-3g openssl fail2ban python3-systemd nodejs
+      - name: Static and safety checks
+        run: |
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          python3 -B -c "from pathlib import Path; [compile(p.read_text(), str(p), 'exec') for folder in ('agent','scripts','tests') for p in Path(folder).rglob('*.py')]"
+          find web -name '*.php' -exec php -l {} +
+          node --check web/public/assets/app.js
+          bash -n scripts/install.sh
+          python3 tests/check_configs.py --serve-test
+          systemd-analyze verify deploy/*.service
+      - name: Isolated database, PHP and socket integration
+        run: python3 tests/integration.py
+      - name: Source release
+        run: |
+          python3 -B scripts/check_publication.py
+          python3 -B scripts/package_release.py

@@ -1,0 +1,17 @@
+[Unit]
+Description=YANP Nas independent firewall rollback watchdog
+After=yanp-firewall.service
+Before=yanp-agent.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/yanp-nas/scripts/firewall_watch.py
+Restart=always
+RestartSec=1
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Restore confirmed YANP Nas firewall table
+After=nftables.service
+Before=yanp-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /opt/yanp-nas/scripts/firewall_boot.py
+
+[Install]
+WantedBy=multi-user.target
