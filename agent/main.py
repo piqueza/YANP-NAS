@@ -18,25 +18,28 @@ import struct
 import threading
 import time
 
-from .backups import Backups
+from .backups import Backups, backup_options, browse_components
 from .core import DB, Error, Locks, Runner, boolean, integer, json_default, keys, require, has_sensitive_fields
 from .devices import Devices
 from .fail2ban import Fail2ban
 from .firewall import Firewall
 from .monitor import Monitor, validate_monitoring
+from .initialize import Initializer
 from .samba import Samba
+from .names import StorageNames
+from .notifications import Notifications, validate_ack_all
 from .storage import Storage
 from .system import System
 
 
 OPERATIONS = {
-    "storage.mount", "storage.unmount", "directory.create", "directory.rename", "directory.access", "directory.user_access",
-    "share.save", "share.remove", "backup.save", "backup.run", "backup.restore", "smart.read",
+    "storage.name", "storage.mount", "storage.unmount", "storage.initialize", "storage.format_partition", "directory.create", "directory.rename", "directory.access", "directory.user_access",
+    "share.save", "share.remove", "backup.save", "backup.run", "backup.restore", "backup.measure", "smart.read",
     "system.updates", "system.install", "system.reboot", "system.shutdown", "firewall.change",
     "fail2ban.ban", "fail2ban.unban", "fail2ban.configure", "account.state", "system.service",
 }
-READS = {"state", "job.read", "backup.inspect", "system.warnings", "firewall.status", "fail2ban.status"}
-SYNC = {"account.sync", "firewall.confirm", "monitoring.save", "event.ack"}
+READS = {"state", "job.read", "backup.inspect", "system.warnings", "firewall.status", "fail2ban.status", "storage.initialize_plan", "storage.format_plan"}
+SYNC = {"account.sync", "firewall.confirm", "monitoring.save", "event.ack", "event.ack_all"}
 
 
 class Agent:
@@ -80,6 +83,10 @@ class Agent:
     def request(self, op, actor, params, root=False):
         user = self.authorize(op, actor, params, root)
         runner = Runner()
+        if op in ('storage.initialize_plan','storage.format_plan'):
+            with self.locks.hold('storage'):
+                initializer = Initializer(Devices(self.config, runner), runner)
+                return (initializer.plan if op == 'storage.initialize_plan' else initializer.format_plan)(params)
         if op == "state":
             keys(params)
             return self.state(user)
@@ -119,6 +126,8 @@ class Agent:
                 validate_monitoring(params)
             elif op == "firewall.confirm":
                 keys(params, ("token",))
+            elif op == "event.ack_all":
+                validate_ack_all(params)
             elif op == "event.ack":
                 keys(params, ("id",))
                 integer(params["id"])
@@ -132,12 +141,16 @@ class Agent:
                 self.monitor.due.clear()
                 self.monitor.wake.set()
                 return setting
+            if op == "event.ack_all":
+                return Notifications(self.db).acknowledge_all(params)
             if op == "event.ack":
                 keys(params, ("id",))
                 self.db.execute("UPDATE events SET acknowledged=1 WHERE id=%s", (integer(params["id"]),))
                 return {"state": "Completed"}
             with self.locks.hold("storage"):
                 return Samba(self.config, self.db, runner).account_sync(params)
+        if op == 'backup.measure':
+            browse_components(params)
         require(isinstance(params, dict) and len(json.dumps(params)) <= 32768, "Invalid operation parameters")
         require(not has_sensitive_fields(params) and not any(k.lower() in ("command", "shell") for k in params), "Sensitive or arbitrary-command parameters are forbidden in jobs")
         with self.enqueue_lock:
@@ -146,7 +159,7 @@ class Agent:
     def enqueue(self, op, actor, params):
         # All detailed validation repeats in the worker against current live Linux state.
         ident = secrets.token_hex(16)
-        backup_id = integer(params.get("id")) if op in ("backup.run", "backup.restore") else None
+        backup_id = integer(params.get("id")) if op in ("backup.run", "backup.restore", "backup.measure") else None
         if backup_id:
             require(not self.db.query("SELECT id FROM jobs WHERE backup_id=%s AND status IN ('queued','running')", (backup_id,)), "This backup already has a queued or running operation")
         require(len(self.db.query("SELECT id FROM jobs WHERE status='queued' LIMIT 101")) < 100, "Job queue is full")
@@ -159,28 +172,37 @@ class Agent:
 
     def state(self, user):
         admin = user["role"] == "admin"
+        names = StorageNames(self.db)
         if admin:
+            devices, volumes = names.decorate(self.db.setting('observed_devices'),self.db.query('SELECT * FROM volumes'))
             directories = self.db.query("SELECT * FROM directories ORDER BY name")
             shares = self.db.query("SELECT * FROM shares ORDER BY name")
             backups = self.db.query("SELECT * FROM backups ORDER BY name")
+            for backup in backups:backup.update(backup_options(self.db,backup['id']))
             jobs = self.db.query("SELECT id,actor_id,operation,status,error,backup_id,started_at,ended_at,created_at FROM jobs ORDER BY created_at DESC LIMIT 50")
-            return {"devices": self.db.setting("observed_devices"), "system": self.db.setting("observed_system"),
+            events = self.db.query('SELECT * FROM events ORDER BY id DESC LIMIT 100')
+            notification_summary = Notifications(self.db).summary(max((e['id'] for e in events),default=0))
+            return {"devices": devices, "system": self.db.setting("observed_system"),
                 "smart": self.db.setting("observed_smart"), "security": self.db.setting("observed_security"),
                 "share_status": self.db.setting("observed_shares"), "timers": self.db.setting("observed_timers"),
                 "directories": directories, "access": self.db.query("SELECT * FROM directory_access"),
                 "shares": shares, "backups": backups, "jobs": jobs,
                 "users": self.db.query("SELECT id,username,display_name,role,enabled,system_synced,created_at FROM users ORDER BY username"),
-                "volumes": self.db.query("SELECT * FROM volumes"),
-                "events": self.db.query("SELECT * FROM events ORDER BY id DESC LIMIT 100"),
+                "volumes": volumes,
+                "events": events, "notification_summary": notification_summary,
                 "audit": self.db.query("SELECT * FROM audit ORDER BY id DESC LIMIT 100"),
                 "monitoring": self.db.setting("monitoring"), "updates": self.db.setting("updates")}
         directories = self.db.query("SELECT d.*,a.mode FROM directories d JOIN directory_access a ON a.directory_id=d.id WHERE a.user_id=%s", (user["id"],))
         shares = self.db.query("SELECT s.*,a.mode FROM shares s JOIN directory_access a ON a.directory_id=s.directory_id WHERE a.user_id=%s AND s.enabled=1", (user["id"],))
         backups = self.db.query("SELECT b.* FROM backups b JOIN directory_access a ON a.directory_id=b.source_id AND a.user_id=b.owner_id WHERE b.owner_id=%s AND b.allow_owner_view=1", (user["id"],))
         jobs = self.db.query("SELECT j.id,j.backup_id,j.operation,j.status,j.started_at,j.ended_at,j.error FROM jobs j JOIN backups b ON b.id=j.backup_id JOIN directory_access a ON a.directory_id=b.source_id AND a.user_id=b.owner_id WHERE b.owner_id=%s AND b.allow_owner_view=1 ORDER BY j.created_at DESC LIMIT 50", (user["id"],))
-        snapshot = self.db.setting("observed_devices", {}) or {}
+        snapshot, _ = names.decorate(self.db.setting("observed_devices", {}) or {},[])
         relevant = {d["volume_uuid"] for d in directories}
-        volumes = [{k: d.get(k) for k in ("uuid", "space", "mountpoints")} for d in snapshot.get("devices", []) if d.get("uuid") in relevant]
+        volumes = [{k: d.get(k) for k in ("uuid", "space", "mountpoints", "display_name")} for d in snapshot.get("devices", []) if d.get("uuid") in relevant]
+        for backup in backups:backup.update(backup_options(self.db,backup['id']))
+        _, destinations = names.decorate(snapshot,[{'uuid':b['destination_uuid']} for b in backups])
+        for backup, destination in zip(backups,destinations):
+            backup['destination_volume_name'] = destination['display_name']
         return {"directories": directories, "shares": shares, "backups": backups, "jobs": jobs,
                 "volumes": volumes, "observed_at": snapshot.get("observed_at")}
 
@@ -191,11 +213,14 @@ class Agent:
         system = System(self.config, self.db, runner)
         f2b = Fail2ban(self.config, self.db, runner)
         mapping = {
+            "storage.name": lambda x: StorageNames(self.db).save(x, storage.devices),
             "storage.mount": storage.mount, "storage.unmount": storage.unmount,
+            "storage.initialize": Initializer(storage.devices, runner).initialize,
+            "storage.format_partition": Initializer(storage.devices, runner).format_partition,
             "directory.create": storage.create, "directory.rename": storage.rename, "directory.access": storage.access,
             "directory.user_access": storage.user_access,
             "share.save": samba.save, "share.remove": samba.remove,
-            "backup.save": backups.save, "backup.run": backups.run_backup, "backup.restore": backups.restore,
+            "backup.save": backups.save, "backup.run": backups.run_backup, "backup.restore": backups.restore, "backup.measure": backups.measure,
             "system.updates": system.updates, "system.install": system.install_updates,
             "system.service": system.service,
             "system.reboot": lambda x: system.power(x, "reboot"), "system.shutdown": lambda x: system.power(x, "shutdown"),

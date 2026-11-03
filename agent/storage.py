@@ -8,6 +8,7 @@ import stat
 
 from .core import Error, atomic_write, boolean, integer, keys, label, require, username
 from .devices import Devices, open_directory
+from .names import StorageNames
 from .filesystems import is_ntfs, mount_options, prepare_ntfs
 
 
@@ -60,6 +61,7 @@ class Storage:
         self.persistent(p["uuid"], p["persistent"], driver, target, options)
         self.db.execute("INSERT INTO volumes(uuid,persistent) VALUES(%s,%s) ON DUPLICATE KEY UPDATE persistent=VALUES(persistent),last_seen=CURRENT_TIMESTAMP",
                         (p["uuid"], p["persistent"]))
+        StorageNames(self.db).remember(self.devices.scan()['devices'])
         return {"state": "Mounted", "mountpoint": str(target), 'read_only': read_only, 'driver': driver}
 
     def persistent(self, uuid, enabled, fstype, target, options='nodev,nosuid,noexec,rw'):

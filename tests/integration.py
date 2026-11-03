@@ -146,6 +146,41 @@ def main():
         state=admin.call('state');assert 'users' in state and 'devices' in state;passed('PHP reads agent state over signed socket')
         user=Client(base);user.call('me');user.call('login',{'username':'yanp_alice','password':standard_password})
         own=user.call('state');assert 'users' not in own and 'system' not in own and 'audit' not in own;passed('standard state excludes admin data')
+        user.call('action',{'operation':'event.ack_all','params':{'scope':'all','through_id':1}},expect=403)
+        assert 'notification_summary' not in own
+        passed('bulk notification acknowledgement and global counts are administrator-only')
+        # More than one UI page of synthetic events; no jobs or hardware changes.
+        with connect(database='yanp_nas') as c,c.cursor() as cur:
+            cur.execute("UPDATE events SET acknowledged=1")
+            cur.executemany("INSERT INTO events(kind,severity,message) VALUES('test.notice','warning','Synthetic older notification')",[()] * 105)
+            cur.execute("INSERT INTO events(kind,severity,message) VALUES('test.FIREWALL','info','Synthetic security notification')")
+            security_id=cur.lastrowid
+        view=admin.call('state');boundary=view['notification_summary']['through_id']
+        assert view['notification_summary']['all']==106 and view['notification_summary']['attention']==105
+        assert len(view['events'])==100
+        with connect(database='yanp_nas') as c,c.cursor() as cur:
+            cur.execute("INSERT INTO events(kind,severity,message) VALUES('test.notice','warning','Synthetic new arrival')")
+            new_id=cur.lastrowid
+            cur.execute('SELECT COUNT(*) FROM jobs');job_count=cur.fetchone()[0]
+        admin.call('action',{'operation':'event.ack_all','params':{'scope':'attention','through_id':boundary}})
+        with connect(database='yanp_nas') as c,c.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM events WHERE kind='test.notice' AND id<=%s AND acknowledged=0",(boundary,))
+            assert cur.fetchone()[0]==0
+            cur.execute('SELECT acknowledged FROM events WHERE id=%s',(new_id,));assert cur.fetchone()[0]==0
+            cur.execute('SELECT acknowledged FROM events WHERE id=%s',(security_id,));assert cur.fetchone()[0]==0
+        admin.call('action',{'operation':'event.ack_all','params':{'scope':'security','through_id':boundary}})
+        with connect(database='yanp_nas') as c,c.cursor() as cur:
+            cur.execute('SELECT acknowledged FROM events WHERE id=%s',(security_id,));assert cur.fetchone()[0]==1
+            cur.execute('SELECT acknowledged FROM events WHERE id=%s',(new_id,));assert cur.fetchone()[0]==0
+        admin.call('action',{'operation':'event.ack_all','params':{'scope':'all','through_id':new_id}})
+        with connect(database='yanp_nas') as c,c.cursor() as cur:
+            cur.execute('SELECT COUNT(*) FROM events WHERE acknowledged=0 AND id<=%s',(new_id,));assert cur.fetchone()[0]==0
+            cur.execute("SELECT COUNT(*) FROM events WHERE kind='test.notice'");assert cur.fetchone()[0]==106
+            cur.execute('SELECT COUNT(*) FROM jobs');assert cur.fetchone()[0]==job_count
+        for invalid in ({'scope':'unknown','through_id':boundary},{'scope':'all','through_id':True},
+                        {'scope':'all','through_id':boundary,'password':'test-invalid-payload'}):
+            admin.call('action',{'operation':'event.ack_all','params':invalid},expect=422)
+        passed('bulk scopes include older pages, preserve newer events, retain history/jobs and reject invalid inputs')
         # Metadata-only fixture: no filesystem or hardware action is invoked.
         assigned_job=secrets.token_hex(16)
         with connect(database='yanp_nas') as c,c.cursor() as cur:
@@ -159,6 +194,62 @@ def main():
         assert any(b['id']==assigned_backup for b in assigned['backups'])
         assert any(j['id']==assigned_job for j in assigned['jobs'])
         passed('assigned users see only their explicitly shared backup metadata/history')
+        user.call('action',{'operation':'storage.name','params':{'kind':'volume','id':'TEST-SOURCE-UUID','name':'Unauthorized'}},expect=403)
+        with connect(database='yanp_nas') as c,c.cursor() as cur:
+            for volume in ('TEST-SOURCE-UUID','TEST-DESTINATION-UUID','TEST-PRIVATE-UUID'):
+                cur.execute('INSERT INTO volumes(uuid) VALUES(%s)',(volume,))
+        for volume,name in (('TEST-SOURCE-UUID','Source archive'),('TEST-DESTINATION-UUID','Backup copies'),('TEST-PRIVATE-UUID','Private disk name')):
+            job=admin.call('action',{'operation':'storage.name','params':{'kind':'volume','id':volume,'name':name}})['job_id']
+            wait_until(lambda:admin.call('action',{'operation':'job.read','params':{'id':job}})['status'] in ('completed','failed'))
+            assert admin.call('action',{'operation':'job.read','params':{'id':job}})['status']=='completed'
+        assert next(v for v in admin.call('state')['volumes'] if v['uuid']=='TEST-SOURCE-UUID')['display_name']=='Source archive'
+        with connect(database='yanp_nas') as c,c.cursor() as cur:
+            observed={'devices':[{'uuid':'TEST-SOURCE-UUID','space':None,'mountpoints':[]}],'observed_at':int(time.time())}
+            cur.execute("INSERT INTO settings(name,value) VALUES('observed_devices',%s) ON DUPLICATE KEY UPDATE value=VALUES(value)",(json.dumps(observed),))
+        named=user.call('state')
+        assert named['volumes'][0]['display_name']=='Source archive'
+        assert named['backups'][0]['destination_volume_name']=='Backup copies'
+        assert 'Private disk name' not in json.dumps(named)
+        with connect(database='yanp_nas') as c,c.cursor() as cur:
+            cur.execute("SELECT value FROM settings WHERE name='storage_names'")
+            assert json.loads(cur.fetchone()[0])['volumes']['TEST-DESTINATION-UUID']=='Backup copies'
+        passed('administrator storage names persist in MariaDB and standard users receive only assigned volume/backup names')
+        # Persist options with the real production DB grants. Timer changes are
+        # mocked here so this check cannot touch installed workstation services.
+        from unittest.mock import patch
+        sys.path.insert(0,str(ROOT))
+        from agent.backups import Backups
+        from agent.core import DB, Runner
+        component=Backups(config,DB(config),Runner())
+        backup_params={'id':assigned_backup,'name':'Review backup','source_id':source_id,
+            'destination_uuid':'TEST-DESTINATION-UUID','destination_name':'review-copy','schedule':'manual',
+            'retention':7,'enabled':True,'owner_id':uid,'allow_owner_view':True}
+        assert component.get(assigned_backup)['mode']=='hardlink'
+        user.call('action',{'operation':'backup.save','params':{**backup_params,'mode':'rolling','rolling_policy':'mirror'}},expect=403)
+        with patch.object(component,'schedule'):
+            for mode,policy in (('hardlink','keep'),('rolling','keep'),('rolling','mirror')):
+                component.save({**backup_params,'mode':mode,'rolling_policy':policy})
+                fresh=Backups(config,DB(config),Runner()).get(assigned_backup)
+                assert (fresh['mode'],fresh['rolling_policy'])==(mode,policy)
+                api_backup=next(b for b in admin.call('state')['backups'] if b['id']==assigned_backup)
+                assert (api_backup['mode'],api_backup['rolling_policy'])==(mode,policy)
+            component.save(backup_params)  # Older clients preserve saved options.
+        assert component.get(assigned_backup)['rolling_policy']=='mirror'
+        with connect(database='yanp_nas') as c,c.cursor() as cur:
+            cur.execute("CREATE TRIGGER reject_backup_option BEFORE INSERT ON settings FOR EACH ROW BEGIN IF NEW.name=%s THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='simulated option write failure'; END IF; END",('backup_options_'+str(assigned_backup),))
+        try:
+            with patch.object(component,'schedule'):
+                try:
+                    component.save({**backup_params,'name':'Should rollback','mode':'hardlink'})
+                    raise AssertionError('Expected transactional failure')
+                except pymysql.MySQLError:pass
+        finally:
+            with connect(database='yanp_nas') as c,c.cursor() as cur:cur.execute('DROP TRIGGER reject_backup_option')
+        fresh=component.get(assigned_backup)
+        assert fresh['name']=='Review backup' and fresh['mode']=='rolling' and fresh['rolling_policy']=='mirror'
+        assigned_options=next(b for b in user.call('state')['backups'] if b['id']==assigned_backup)
+        assert assigned_options['mode']=='rolling' and assigned_options['rolling_policy']=='mirror'
+        passed('backup modes and rolling deletion policies persist atomically, preserve older-client edits, and enforce administrator-only changes')
         def event_revision(client):
             with client.open.open(base+'/api.php?route=events',timeout=10) as response:
                 for _ in range(8):
@@ -175,8 +266,25 @@ def main():
         passed('revoked source access hides backup metadata/history and stops backup event notifications')
         user.call('users.create',{'username':'yanp_intruder','display_name':'Bad','role':'admin','password':password},expect=403);passed('direct admin endpoint forbidden')
         user.call('action',{'operation':'system.reboot','params':{}},expect=403);passed('direct privileged action forbidden')
+        user.call('action',{'operation':'storage.initialize_plan','params':{'stable_id':'not-a-device'}},expect=403)
+        user.call('action',{'operation':'storage.initialize','params':{}},expect=403)
+        user.call('action',{'operation':'storage.format_plan','params':{}},expect=403)
+        user.call('action',{'operation':'storage.format_partition','params':{}},expect=403)
+        admin.call('action',{'operation':'storage.initialize_plan','params':{'stable_id':'not-a-device'}},expect=422)
+        admin.call('action',{'operation':'storage.format_plan','params':{'stable_id':'not-a-device','partition_uuid':'11111111-2222-3333-4444-555555555555'}},expect=422)
+        passed('disk initialization/format previews and writes are administrator-only and missing disks are refused')
         user.call('action',{'operation':'backup.inspect','params':{'id':1}},expect=422);passed('unassigned backup cannot be inspected')
         admin.call('action',{'operation':'exec','params':{'command':'id'}},expect=422);passed('arbitrary commands rejected by agent')
+        user.call('action',{'operation':'backup.measure','params':{'id':assigned_backup}},expect=403)
+        admin.call('action',{'operation':'backup.measure','params':{'id':assigned_backup,'snapshot':'current','path':'../outside'}},expect=422)
+        measured=admin.call('action',{'operation':'backup.measure','params':{'id':assigned_backup}})
+        def measurement_failed():
+            return admin.call('action',{'operation':'job.read','params':{'id':measured['job_id']}})['status']=='failed'
+        wait_until(measurement_failed)
+        measured_job=admin.call('action',{'operation':'job.read','params':{'id':measured['job_id']}})
+        assert measured_job['backup_id']==assigned_backup and measured_job['operation']=='backup.measure'
+        assert measured_job['result'] is None
+        passed('disk usage calculation is admin-only, validates paths before queueing and records unavailable destinations as failed jobs')
         admin.call('action',{'operation':'monitoring.save','params':{'profile':'eco'}});passed('monitoring change persists immediately')
         admin.call('action',{'operation':'monitoring.save','params':{'profile':'custom','smart':1}},expect=422);passed('unsafe monitoring intervals rejected')
         queued=admin.call('action',{'operation':'storage.mount','params':{'uuid':'../../etc','persistent':False}});jobid=queued['job_id']

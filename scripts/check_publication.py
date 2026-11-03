@@ -12,6 +12,7 @@ import sys
 
 
 PATTERNS = {
+    'unresolved merge conflict': re.compile(rb'(?m)^(?:<{7}|>{7})[ \t]'),
     'private key': re.compile(rb'-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----'),
     'provider credential': re.compile(rb'(?:gh[pousr]_[A-Za-z0-9]{25,}|github_pat_[A-Za-z0-9_]{30,}|(?:AKIA|ASIA)[A-Z0-9]{16}|sk-(?:proj-)?[A-Za-z0-9_-]{30,})'),
     'local workstation path': re.compile(b'/' + rb'(?:home|Users)/[A-Za-z0-9_.-]+(?:/|\x00)|[A-Za-z]:\\Users\\[A-Za-z0-9_.-]+\\'),

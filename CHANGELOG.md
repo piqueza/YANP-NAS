@@ -2,6 +2,50 @@
 
 ## 0.2.0 — 2026-10-31
 
+- Add administrator-triggered background disk usage calculations for all backup
+  copies, individual snapshots and subfolders. Native du measures allocated
+  bytes, deduplicates hard links within the selection and saves results in Activity.
+
+- Show readable local dates beneath backup-browser names: recorded completion
+  time for successful copies, UTC folder-name start time for older/incomplete
+  dated snapshots, and modified time for browsed files/subfolders.
+
+- Fix backup browsing sizes: measure nested file contents instead of directory
+  inode length, format small files in B/KiB/MiB, and explain logical sizes versus
+  shared hard-link storage. Bounded scans report unknown sizes rather than zero.
+
+- Add scoped Acknowledge all buttons to Activity, dashboard warnings and Network
+  security events. Include older notifications while preserving arrivals after
+  the displayed state. Show negotiated speeds for active network interfaces
+  on both System and Network & Security.
+
+- Backup choices: dated hard-linked snapshots with checksum comparison and
+  completion-based retention, or one rolling copy with selectable keep/mirror
+  deletion policy. Preserve old history on mode switches, mark rolling failures
+  incomplete, and restore either mode into independent new files. Options and
+  backup configuration commit together in existing database settings.
+
+- Storage display names: editable disk and volume aliases, persisted through
+  the existing settings table with stable disk IDs / filesystem UUIDs. Use names
+  in Storage, dashboard, shares/directories, backups and restore choices,
+  including known offline backup destinations. Volume overrides and clearing
+  names are supported; labels, mount paths and job identifiers are unchanged.
+
+- Storage follow-up, 2026-11-03: show partition creation and formatting as two
+  stages of one action; keep success/failure results with an OK-only dismissal
+  and block resubmission. Exclude enclosing GPT entry details from blank-content
+  probes, permit live-verified empty GPTs, and offer a separately confirmed
+  Finish formatting action for a single empty YANP data partition.
+
+- Initialization fix, 2026-11-03: use native sfdisk start/end alignment instead
+  of forcing a 1 MiB start. USB devices reporting a large optimal I/O size can
+  reserve a larger GPT starting range; regression tests cover this refusal.
+
+- Empty-disk initialization: administrator-only preview and typed confirmation,
+  GPT plus one data partition with an ext4 (default), Btrfs or NTFS dropdown, 512-byte/4K-sector handling, stable identity and
+  kernel-generation checks, live signature/holder/mount guards and no forced
+  overwrite of existing storage. Native fdisk/e2fsprogs/btrfs-progs/ntfs-3g dependencies included.
+
 - First-publication QA, 2026-11-02: restore confirmed firewall persistence after
   confirmation failures; refuse mounts inside the updater's application tree;
   stop backup notifications after source-access revocation; require the canonical

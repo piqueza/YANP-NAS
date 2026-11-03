@@ -7,6 +7,7 @@ import time
 
 from .core import Error, require, uuid_value
 from .filesystems import SUPPORTED, mount_capability
+from .initialize import initialize_capability, finish_format_candidate
 
 
 class Devices:
@@ -16,7 +17,7 @@ class Devices:
 
     def scan(self):
         data = json.loads(self.run.run(["lsblk", "--json", "--bytes", "--paths", "--output",
-            "NAME,KNAME,PATH,TYPE,SIZE,VENDOR,MODEL,SERIAL,TRAN,UUID,FSTYPE,MOUNTPOINTS,PKNAME,RO,MAJ:MIN,PARTTYPE,PARTLABEL,PARTTYPENAME"]))
+            "NAME,KNAME,PATH,TYPE,SIZE,VENDOR,MODEL,SERIAL,TRAN,UUID,FSTYPE,MOUNTPOINTS,PKNAME,RO,MAJ:MIN,PARTTYPE,PARTLABEL,PARTTYPENAME,PARTUUID,PTTYPE,PTUUID,LOG-SEC,START"]))
         tree = data["blockdevices"]
         flat, parents = {}, {}
 
@@ -25,6 +26,7 @@ class Devices:
                 key = node["path"]
                 flat[key] = {k: v for k, v in node.items() if k != "children"}
                 flat[key]['has_partitions'] = any(c.get('type') == 'part' for c in node.get('children', []))
+                flat[key]['has_children'] = bool(node.get('children'))
                 if parent:
                     parents.setdefault(key, set()).add(parent)
                 if node.get("pkname"):
@@ -84,6 +86,13 @@ class Devices:
                         node["stable_id"] = str(link)
                         break
             node["space"] = None
+            if node.get('type') in ('disk','part'):
+                try:
+                    sysfs = Path('/sys/dev/block') / node['maj:min']
+                    if node.get('type') == 'disk':node['disk_sequence'] = (sysfs / 'diskseq').read_text().strip()
+                    node['holders'] = [p.name for p in (sysfs / 'holders').iterdir()]
+                except (OSError, KeyError):
+                    node['disk_sequence'], node['holders'] = None, None
             for mount in node.get("mountpoints") or []:
                 if mount and mount.startswith(str(self.root) + "/") and os.path.ismount(mount):
                     try:
@@ -97,6 +106,8 @@ class Devices:
                 counts[node['uuid']] = counts.get(node['uuid'], 0) + 1
         for node in flat.values():
             node.update(mount_capability(node, counts.get(node.get('uuid'), 0)))
+            node.update(initialize_capability(node))
+            node['can_finish_format'] = finish_format_candidate(node, list(flat.values()))
         return {"observed_at": int(time.time()), "devices": list(flat.values())}
 
     def volume(self, uuid, mounted=False, write=False, check_permissions=True):

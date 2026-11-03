@@ -1,5 +1,15 @@
 # YANP Nas 0.2.0 — first-publication QA
 
+**Follow-up:** empty-disk initialization with ext4 (default), Btrfs or NTFS
+was added after this review. Its current
+test evidence and hardware limits are in [VALIDATION.md](VALIDATION.md). The
+105/46 result table below is retained as the earlier publication checkpoint.
+The new partition/format action still needs disposable-disk acceptance on the
+NAS before promoting a production release.
+Publication scanning now also rejects unresolved Git conflict markers. Finish
+any pending repository merge before a new Git push; a clean test export does
+not resolve the checkout's Git index or continue a merge/rebase.
+
 Review date: **2 November 2026**. Decision: **suitable for a public experimental
 source release; production acceptance remains incomplete**. No unresolved
 publication blocker was identified in the reviewed source after the corrections

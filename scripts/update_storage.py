@@ -110,7 +110,7 @@ def main():
     if not args.apply:
         print('Run on the NAS from the new release checkout:\n'
               '  sudo python3 -B scripts/update_storage.py --apply\n'
-              'Installs ntfs-3g, backs up/replaces application code, and restarts Apache/agent.\n'
+              'Installs native filesystem/partition tools, backs up/replaces code, and restarts Apache/agent.\n'
               'Preserves database, accounts, certificates, shares and disk files.\n'
               'Requires an idle YANP Nas 0.2.0 installation on Debian 13.\n'
               'The web interface is briefly unavailable during deployment.')
@@ -134,7 +134,7 @@ def main():
     require(not Path('/var/lib/yanp-nas/firewall-pending.json').exists(), 'Finish the pending firewall change first')
     run = Runner()
     run.run(['apt-get', 'update'], timeout=600)
-    run.run(['apt-get', 'install', '-y', 'ntfs-3g'], timeout=600)
+    run.run(['apt-get', 'install', '-y', 'ntfs-3g', 'btrfs-progs', 'fdisk', 'e2fsprogs', 'udev'], timeout=600)
     stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     backup = Path('/var/backups/yanp-nas') / ('storage-update-' + stamp)
     backup.mkdir(parents=True, mode=0o700)

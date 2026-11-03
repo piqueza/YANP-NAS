@@ -2,6 +2,21 @@
 
 ## Routine operation
 
+### Notifications and interface speeds
+
+Acknowledge all on Activity marks all pending notifications through the displayed
+state as acknowledged, including older entries outside the latest 100 shown. The
+dashboard button covers warnings/errors; Network covers security/firewall/Fail2ban
+events. Newer arrivals remain pending. Acknowledgement preserves event and job
+history and does not resolve the underlying condition. Only administrators can
+acknowledge notifications.
+
+The Network interfaces card on System and Network & Security shows the
+negotiated rate beside active interfaces,
+such as 100 Mbps, 1 Gbps or 2.5 Gbps. This is link capacity, not current traffic.
+Values update with the system observation; unsupported drivers show Link speed
+unavailable. No speed is shown for inactive links or loopback.
+
 ### Existing partition and NTFS feature update
 
 For an existing YANP Nas 0.2.0 installation, use
@@ -36,6 +51,10 @@ and site selection are restored. Enabled Apache modules remain enabled.
 After success, open `http://<server-IP>` or `https://<server-IP>` with no port
 suffix. Do not rerun the one-time installer. Browsers may retain an old tab at
 `:9443`; update its address/bookmark.
+
+Backup mode and rolling keep/mirror deletion choices are described in
+[BACKUPS.md](BACKUPS.md). A mirror intentionally propagates source deletions;
+rolling copies have no dated rollback.
 
 Use the UI's operation log for command output and actual completion status.
 `Running` means execution is still in progress. A nonzero rsync result, including

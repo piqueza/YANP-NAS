@@ -3,6 +3,12 @@
 const $ = (s, root=document) => root.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const bytes = n => n == null ? 'Unavailable' : new Intl.NumberFormat(undefined, {notation:'compact', maximumFractionDigits:1}).format(n / 1024**3) + ' GiB';
+const contentBytes = n => {
+  if(n==null||!Number.isFinite(n)||n<0)return 'Not calculated';
+  const units=['B','KiB','MiB','GiB','TiB','PiB'];
+  const index=n===0?0:Math.min(Math.floor(Math.log(n)/Math.log(1024)),units.length-1);
+  return new Intl.NumberFormat(undefined,{maximumFractionDigits:1}).format(n/1024**index)+' '+units[index];
+};
 const when = n => !n ? 'Not yet observed' : new Date(typeof n === 'number' ? n*1000 : (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(n)?n.replace(' ','T')+'Z':n)).toLocaleString();
 const badge = (s, extra='') => `<span class="badge ${/failed|error|unavailable|inactive/i.test(s)?'danger':/warning|queued|checking|standby/i.test(s)?'warn':/mounted|completed|active|healthy|enabled/i.test(s)?'good':''} ${extra}">${esc(s)}</span>`;
 const icon = name => {
@@ -38,9 +44,13 @@ const observed=(stamp)=>`<span class="muted small">Observed ${esc(when(stamp))}<
 const field=(label,name,type='text',value='',attrs='')=>`<label>${esc(label)}<input name="${name}" type="${type}" value="${esc(value)}" ${attrs}></label>`;
 const select=(label,name,options,value='',attrs='')=>`<label>${esc(label)}<select name="${name}" ${attrs}>${options.map(([v,t])=>`<option value="${esc(v)}" ${String(v)===String(value)?'selected':''}>${esc(t)}</option>`).join('')}</select></label>`;
 const check=(label,name,value=false)=>`<label class="check"><input type="checkbox" name="${name}" ${value?'checked':''}>${esc(label)}</label>`;
-const optionsDirs=()=> (state.directories||[]).map(d=>[d.id,d.name]);
-const optionsVolumes=(writable=false)=> (state.devices?.devices||[]).filter(d=>d.uuid&&!d.protected&&d.space&&(!writable||!d.mount_read_only)).map(d=>[d.uuid,`${d.model||d.uuid} · ${bytes(d.space.free)} free${d.mount_read_only?' · Read-only':''}`]);
-const optionsKnownVolumes=()=>{const live=optionsVolumes();return [...live,...(state.volumes||[]).filter(v=>!live.some(([id])=>id===v.uuid)).map(v=>[v.uuid,v.uuid+' · Unavailable'])];};
+const volumeInfo=uuid=>!uuid?undefined:(state.devices?.devices||[]).find(v=>v.uuid===uuid)||(state.volumes||[]).find(v=>v.uuid===uuid);
+const volumeName=uuid=>volumeInfo(uuid)?.display_name||volumeInfo(uuid)?.model||uuid||'Unknown volume';
+const volumeLabel=uuid=>volumeName(uuid)===uuid?uuid:`${volumeName(uuid)} · ${String(uuid).slice(-8)}`;
+const directoryLabel=d=>`${d.name} — ${volumeLabel(d.volume_uuid)}`;
+const optionsDirs=()=> (state.directories||[]).map(d=>[d.id,directoryLabel(d)]);
+const optionsVolumes=(writable=false)=> (state.devices?.devices||[]).filter(d=>d.uuid&&!d.protected&&d.space&&(!writable||!d.mount_read_only)).map(d=>[d.uuid,`${volumeLabel(d.uuid)} · ${bytes(d.space.free)} free${d.mount_read_only?' · Read-only':''}`]);
+const optionsKnownVolumes=()=>{const live=optionsVolumes();return [...live,...(state.volumes||[]).filter(v=>!live.some(([id])=>id===v.uuid)).map(v=>[v.uuid,volumeLabel(v.uuid)+' · Unavailable'])];};
 function dialog(title, body, form='', submit='Save') {
   $('#dialog-content').innerHTML=`<div class="modal-head"><h2>${esc(title)}</h2>${btn('×','close','','icon-button')}</div>${form?`<form data-form="${form}">${body}<p data-form-status role="status" aria-live="polite"></p><p data-form-error class="form-error" role="alert"></p><div class="modal-actions">${btn('Cancel','close')}<button type="submit" class="primary">${esc(submit)}</button></div></form>`:body}`;
   $('#dialog').showModal();
@@ -73,6 +83,12 @@ function shareUserFields(directory) {
   }).join('')||'<p class="muted">No file-sharing accounts yet. Create a user and set their Samba password, then refresh this list.</p>';
 }
 function progress(form,message) {const el=$('[data-form-status]',form);if(el)el.textContent=message;}
+function finishInitialization(form) {
+  form.dataset.initializationFinished='true';
+  form.noValidate=true;
+  for(const control of form.querySelectorAll('input,select,textarea'))control.disabled=true;
+  $('.modal-actions',form).innerHTML=btn('OK','close','','primary');
+}
 async function completedAction(operation,params,form) {
   const session=user;
   const queued=await api('action',{operation,params});
@@ -81,6 +97,7 @@ async function completedAction(operation,params,form) {
   const deadline=Date.now()+180000;
   while(user===session) {
     const job=await api('action',{operation:'job.read',params:{id:queued.job_id}});
+    if(operation==='storage.initialize'&&['queued','running'].includes(job.status))progress(form,(job.log||'').includes('Step 2 of 2:')?'Step 2 of 2: Formatting and verifying the new partition…':'Step 1 of 2: Creating the partition table and data partition…');
     if(job.status==='completed'){delete form.dataset.pendingJob;return typeof job.result==='string'?JSON.parse(job.result||'{}'):job.result;}
     if(job.status==='failed'){delete form.dataset.pendingJob;throw Error(job.error||'Operation failed. Inspect Activity for details.');}
     if(Date.now()>deadline)throw Error('The operation is still running. Check Activity, then reopen this editor after it finishes.');
@@ -100,7 +117,7 @@ async function loginView() {
 
 function shell() {
   const allowed=isAdmin()?nav:nav.filter(([key])=>['dashboard','storage','shares','backups','settings'].includes(key));
-  $('#app').innerHTML=`<div class="layout"><aside class="sidebar"><a class="wordmark" href="#dashboard"><span class="brandmark">Y</span>YANP Nas</a><div class="sidebar-label">WORKSPACE</div><nav>${allowed.map(([key,name])=>`<a href="#${key}" class="${key===page?'selected':''}">${icon(key)}<span>${name}</span>${key==='activity'&&(state.events||[]).some(e=>!e.acknowledged)?'<i class="dot"></i>':''}</a>`).join('')}</nav><div class="sidebar-bottom"><div class="host"><span class="host-dot"></span><div>${esc(state.system?.hostname||'YANP Nas')}<small>${esc(state.system?.os||'Private management console')}</small></div></div><div class="profile"><span class="avatar">${esc(user.display_name.slice(0,1).toUpperCase())}</span><div>${esc(user.display_name)}<small>${isAdmin()?'Administrator':'Standard user'}</small></div>${btn('↪','logout','','icon-button logout')}</div></div></aside><main class="workspace"><header><div class="breadcrumb">Workspace <span>/</span> ${esc(nav.find(n=>n[0]===page)?.[1]||'Dashboard')}</div><div class="header-right"><span class="live" id="live"><i></i>Connected</span>${btn('↻ Refresh','refresh','','quiet')}</div></header><div id="content"></div><footer>YANP Nas <span>System state comes from Linux · All times shown locally</span></footer></main></div>`;
+  $('#app').innerHTML=`<div class="layout"><aside class="sidebar"><a class="wordmark" href="#dashboard"><span class="brandmark">Y</span>YANP Nas</a><div class="sidebar-label">WORKSPACE</div><nav>${allowed.map(([key,name])=>`<a href="#${key}" class="${key===page?'selected':''}">${icon(key)}<span>${name}</span>${key==='activity'&&notificationCount('all')?'<i class="dot"></i>':''}</a>`).join('')}</nav><div class="sidebar-bottom"><div class="host"><span class="host-dot"></span><div>${esc(state.system?.hostname||'YANP Nas')}<small>${esc(state.system?.os||'Private management console')}</small></div></div><div class="profile"><span class="avatar">${esc(user.display_name.slice(0,1).toUpperCase())}</span><div>${esc(user.display_name)}<small>${isAdmin()?'Administrator':'Standard user'}</small></div>${btn('↪','logout','','icon-button logout')}</div></div></aside><main class="workspace"><header><div class="breadcrumb">Workspace <span>/</span> ${esc(nav.find(n=>n[0]===page)?.[1]||'Dashboard')}</div><div class="header-right"><span class="live" id="live"><i></i>Connected</span>${btn('↻ Refresh','refresh','','quiet')}</div></header><div id="content"></div><footer>YANP Nas <span>System state comes from Linux · All times shown locally</span></footer></main></div>`;
   render();
 }
 function pageHeader(eyebrow,title,description,buttons='') {
@@ -121,47 +138,52 @@ function dashboard() {
   const active=(state.jobs||[]).filter(j=>['running','queued'].includes(j.status)).length;
   return pageHeader('OVERVIEW',`Your NAS, at a glance.`,`${state.system?.hostname||'Server'} · ${state.system?.os||'Waiting for the first system observation'}`,btn('Manage storage','navigate','data-page="storage"','primary'))+
     (!state.devices?'<div class="notice">The agent is collecting its first observation. Data appears when collection completes.</div>':'')+
-    `<div class="stats">${stat('Available storage',total?bytes(free):'Not mounted',total?`${bytes(used)} of ${bytes(total)} used`:'Approve and mount an existing filesystem','storage')}${stat('Physical disks',disks.length,`${volumes.length} managed volumes mounted`,'storage')}${stat('Active operations',active,'Immediate jobs · persistent history','backups')}${stat('Needs attention',alerts.length,alerts.length?'Review activity and notifications':'No unacknowledged warnings','network')}</div>`+
-    `<div class="dashboard-grid">${panel('Storage overview',volumes.length?volumes.map(v=>`<div class="volume-row"><div class="volume-icon">${icon('storage')}</div><div class="volume-detail"><div><strong>${esc(v.model||v.uuid)}</strong>${badge('Mounted')}</div><span class="small muted">${esc(v.uuid)}</span><progress value="${v.space.used}" max="${v.space.total}"></progress><div class="small muted"><span>${bytes(v.space.used)} used</span><span>${bytes(v.space.free)} available</span></div></div></div>`).join(''):empty('No managed volumes are mounted.'),observed(state.devices?.observed_at))}${panel('System health',state.system?`<div class="health-metrics"><div><span>Processor</span><strong>${cpuPercent==null?'Collecting…':cpuPercent+'%'}</strong></div><div><span>Memory</span><strong>${bytes(state.system.memory.total-state.system.memory.available)} <small>/ ${bytes(state.system.memory.total)}</small></strong></div><div><span>Uptime</span><strong>${Math.floor(state.system.uptime/86400)}d ${Math.floor(state.system.uptime%86400/3600)}h</strong></div></div><div class="service-list">${Object.entries(state.system.services).map(([s,status])=>`<div><span>${esc(s)}</span>${badge(status)}</div>`).join('')}</div>`:empty('System observations are not available yet.'),observed(state.system?.observed_at))}</div>`+
-    panel('Recent operations',jobs())+(alerts.length?panel('Needs attention',alerts.slice(0,3).map(e=>`<div class="alert-row">${badge(e.severity)}<p>${esc(e.message)}</p>${btn('Review','navigate','data-page="activity"','quiet')}</div>`).join('')):'');
+    `<div class="stats">${stat('Available storage',total?bytes(free):'Not mounted',total?`${bytes(used)} of ${bytes(total)} used`:'Approve and mount an existing filesystem','storage')}${stat('Physical disks',disks.length,`${volumes.length} managed volumes mounted`,'storage')}${stat('Active operations',active,'Immediate jobs · persistent history','backups')}${stat('Needs attention',notificationCount('attention'),notificationCount('attention')?'Review activity and notifications':'No unacknowledged warnings','network')}</div>`+
+    `<div class="dashboard-grid">${panel('Storage overview',volumes.length?volumes.map(v=>`<div class="volume-row"><div class="volume-icon">${icon('storage')}</div><div class="volume-detail"><div><strong>${esc(volumeName(v.uuid))}</strong>${badge('Mounted')}</div><span class="small muted">${esc(v.uuid)}</span><progress value="${v.space.used}" max="${v.space.total}"></progress><div class="small muted"><span>${bytes(v.space.used)} used</span><span>${bytes(v.space.free)} available</span></div></div></div>`).join(''):empty('No managed volumes are mounted.'),observed(state.devices?.observed_at))}${panel('System health',state.system?`<div class="health-metrics"><div><span>Processor</span><strong>${cpuPercent==null?'Collecting…':cpuPercent+'%'}</strong></div><div><span>Memory</span><strong>${bytes(state.system.memory.total-state.system.memory.available)} <small>/ ${bytes(state.system.memory.total)}</small></strong></div><div><span>Uptime</span><strong>${Math.floor(state.system.uptime/86400)}d ${Math.floor(state.system.uptime%86400/3600)}h</strong></div></div><div class="service-list">${Object.entries(state.system.services).map(([s,status])=>`<div><span>${esc(s)}</span>${badge(status)}</div>`).join('')}</div>`:empty('System observations are not available yet.'),observed(state.system?.observed_at))}</div>`+
+    panel('Recent operations',jobs())+(notificationCount('attention')?panel('Needs attention',alerts.slice(0,3).map(e=>`<div class="alert-row">${badge(e.severity)}<p>${esc(e.message)}</p>${btn('Review','navigate','data-page="activity"','quiet')}</div>`).join('')||empty('Earlier notifications remain unacknowledged.'),acknowledgeAllButton('attention')):'');
 }
 function directoriesTable() {
-  return (state.directories||[]).length?`<div class="table-scroll"><table><thead><tr><th>Directory</th><th>Volume UUID</th><th>${isAdmin()?'Access':'Your access'}</th><th></th></tr></thead><tbody>${state.directories.map(d=>`<tr><td><strong>${esc(d.name)}</strong></td><td><code>${esc(d.volume_uuid)}</code></td><td>${isAdmin()?`${(state.access||[]).filter(a=>a.directory_id===d.id).length} users`:badge(d.mode==='rw'?'Read / write':'Read only')}</td><td>${isAdmin()?btn('Permissions','permissions',`data-id="${d.id}"`,'quiet')+btn('Rename','rename',`data-id="${d.id}"`,'quiet'):''}</td></tr>`).join('')}</tbody></table></div>`:empty('No directories have been assigned yet.');
+  return (state.directories||[]).length?`<div class="table-scroll"><table><thead><tr><th>Directory</th><th>Volume</th><th>${isAdmin()?'Access':'Your access'}</th><th></th></tr></thead><tbody>${state.directories.map(d=>`<tr><td><strong>${esc(d.name)}</strong></td><td><strong>${esc(volumeName(d.volume_uuid))}</strong><small><code>${esc(d.volume_uuid)}</code></small></td><td>${isAdmin()?`${(state.access||[]).filter(a=>a.directory_id===d.id).length} users`:badge(d.mode==='rw'?'Read / write':'Read only')}</td><td>${isAdmin()?btn('Permissions','permissions',`data-id="${d.id}"`,'quiet')+btn('Rename','rename',`data-id="${d.id}"`,'quiet'):''}</td></tr>`).join('')}</tbody></table></div>`:empty('No directories have been assigned yet.');
 }
 function storagePage() {
-  if(!isAdmin()) return pageHeader('STORAGE','Your storage','Capacity is shared with other users of the same volume.')+panel('Assigned volumes',(state.volumes||[]).map(v=>`<div class="row"><code>${esc(v.uuid)}</code>${badge(v.space?'Mounted':'Unavailable')}<span>${bytes(v.space?.free)} free</span></div>`).join('')||empty('No assigned volumes.'),observed(state.observed_at));
+  if(!isAdmin()) return pageHeader('STORAGE','Your storage','Capacity is shared with other users of the same volume.')+panel('Assigned volumes',(state.volumes||[]).map(v=>`<div class="row"><strong>${esc(v.display_name||v.uuid)}</strong><small>${esc(v.uuid)}</small>${badge(v.space?'Mounted':'Unavailable')}<span>${bytes(v.space?.free)} free</span></div>`).join('')||empty('No assigned volumes.'),observed(state.observed_at));
   const all=state.devices?.devices||[];
   return pageHeader('STORAGE','Every disk, in view.','Inspect real devices. Mount existing filesystems when you are ready.',btn('Create directory','directory','','primary'))+
     (!all.length?empty('No disks have been observed. Check the agent and refresh.'):all.filter(d=>d.type==='disk').map(d=>{
       const parts=all.filter(p=>p.path===d.path||p.physical_disks?.includes(d.path));
       const smart=state.smart?.reports?.[d.stable_id], temp=smart?.temperature?.current;
-      return panel(`<span class="disk-title">${icon('storage')}${esc([d.vendor,d.model].filter(Boolean).join(' ')||d.path)}</span>`,
-        `<div class="disk-meta"><div><span>CAPACITY</span><strong>${bytes(d.size)}</strong></div><div><span>SERIAL</span><strong>${esc(d.serial||'Unavailable')}</strong></div><div><span>CONNECTION</span><strong>${esc(d.tran?.toUpperCase()||'Unknown')}</strong></div><div><span>TEMPERATURE</span><strong>${temp==null?'Unavailable':esc(temp)+' °C'}</strong></div><div><span>SMART</span>${badge(smart?.smart_status?smart.smart_status.passed?'Healthy':'Warning':smart?.collection_state||'Not collected')}</div></div><details><summary>Device identifiers & SMART details</summary><p><code>${esc(d.path)}</code></p><p><code>${esc(d.stable_id||'No stable by-id link')}</code></p><p>${observed(state.smart?.observed_at)}</p>${d.stable_id?btn('Read SMART without waking standby disk','smart',`data-id="${esc(d.stable_id)}"`):''}<pre>${esc(JSON.stringify(smart||{status:'No SMART report yet'},null,2))}</pre></details><div class="table-scroll"><table><thead><tr><th>Partition / device</th><th>Filesystem</th><th>Capacity</th><th>State</th><th></th></tr></thead><tbody>${parts.map(p=>{
+      return panel(`<span class="disk-title">${icon('storage')}${esc(d.disk_display_name||d.display_name||[d.vendor,d.model].filter(Boolean).join(' ')||d.path)}</span>`,
+        `<div class="disk-meta"><div><span>MODEL</span><strong>${esc([d.vendor,d.model].filter(Boolean).join(' ')||d.path)}</strong></div><div><span>CAPACITY</span><strong>${bytes(d.size)}</strong></div><div><span>SERIAL</span><strong>${esc(d.serial||'Unavailable')}</strong></div><div><span>CONNECTION</span><strong>${esc(d.tran?.toUpperCase()||'Unknown')}</strong></div><div><span>TEMPERATURE</span><strong>${temp==null?'Unavailable':esc(temp)+' °C'}</strong></div><div><span>SMART</span>${badge(smart?.smart_status?smart.smart_status.passed?'Healthy':'Warning':smart?.collection_state||'Not collected')}</div></div><details><summary>Device identifiers & SMART details</summary><p><code>${esc(d.path)}</code></p><p><code>${esc(d.stable_id||'No stable by-id link')}</code></p><p>${observed(state.smart?.observed_at)}</p>${d.stable_id?btn('Read SMART without waking standby disk','smart',`data-id="${esc(d.stable_id)}"`):''}<pre>${esc(JSON.stringify(smart||{status:'No SMART report yet'},null,2))}</pre></details><div class="table-scroll"><table><thead><tr><th>Partition / device</th><th>Filesystem</th><th>Capacity</th><th>State</th><th></th></tr></thead><tbody>${parts.map(p=>{
           const mounted=!!p.mounted_by_manager, external=(p.mountpoints||[]).filter(Boolean);
           const status=p.protected?'OS / external mount':mounted?(p.mount_read_only?'Mounted (read-only)':'Mounted'):p.has_partitions?'Partitioned disk':!p.fstype?'No filesystem':'Unmounted';
-          return `<tr><td><strong>${esc(p.path)}</strong><small>${esc(p.uuid||'No filesystem UUID')}</small>${p.parttypename||p.partlabel?`<small>${esc([p.parttypename,p.partlabel].filter(Boolean).join(' · '))}</small>`:''}</td><td>${esc(p.fstype||'—')}${p.mount_driver==='ntfs-3g'?'<small>ntfs-3g</small>':''}</td><td>${bytes(p.size)}${p.space?`<small>${bytes(p.space.free)} free</small>`:''}</td><td>${badge(status)}<small>${esc(external.join(', '))}</small></td><td>${p.can_unmount?btn('Unmount','unmount',`data-id="${esc(p.uuid)}"`,'quiet'):p.can_mount?btn('Mount…','mount',`data-id="${esc(p.uuid)}"`,'primary small'):`<span class="muted small">${esc(p.mount_block_reason||'Refresh device state to see mount options.')}</span>`}</td></tr>`;
-        }).join('')}</tbody></table></div>`,observed(state.devices?.observed_at));
+          return `<tr><td><strong>${esc(p.uuid?volumeName(p.uuid):p.path)}</strong>${p.uuid?`<small>${esc(p.path)}</small>`:''}<small>${esc(p.uuid||'No filesystem UUID')}</small>${p.parttypename||p.partlabel?`<small>${esc([p.parttypename,p.partlabel].filter(Boolean).join(' · '))}</small>`:''}</td><td>${esc(p.fstype||'—')}${p.mount_driver==='ntfs-3g'?'<small>ntfs-3g</small>':''}</td><td>${bytes(p.size)}${p.space?`<small>${bytes(p.space.free)} free</small>`:''}</td><td>${badge(status)}<small>${esc(external.join(', '))}</small></td><td>${p.can_unmount?btn('Unmount','unmount',`data-id="${esc(p.uuid)}"`,'quiet'):p.can_mount?btn('Mount…','mount',`data-id="${esc(p.uuid)}"`,'primary small'):p.can_finish_format?btn('Finish formatting…','finish-format',`data-id="${esc(p.partuuid)}"`,'primary small'):p.can_initialize?btn('Initialize empty disk…','initialize',`data-id="${esc(p.stable_id)}"`,'primary small'):`<span class="muted small">${esc(p.type==='disk'&&!p.fstype&&!p.has_partitions?p.initialize_block_reason||p.mount_block_reason:p.mount_block_reason||'Refresh device state to see mount options.')}</span>`}${p.uuid&&all.filter(n=>n.uuid===p.uuid).length===1?btn(p.custom_name?'Rename volume':'Name volume','storage-name',`data-kind="volume" data-id="${esc(p.uuid)}"`,'quiet small'):''}</td></tr>`;
+        }).join('')}</tbody></table></div>`,`${observed(state.devices?.observed_at)} ${d.stable_id?btn(d.disk_custom_name?'Rename disk':'Name disk','storage-name',`data-kind="disk" data-id="${esc(d.stable_id)}"`,'quiet small'):''}`);
     }).join(''))+panel('Managed directories',directoriesTable());
 }
 function sharesPage() {
   const host=state.system?.hostname||'NAS-HOST';
   return pageHeader('SHARING','Files, for the right people.','Directory ACLs and Samba permissions work together.',isAdmin()?btn('Create share','share','','primary'):'')+
-    panel('Samba shares',(state.shares||[]).length?`<div class="table-scroll"><table><thead><tr><th>Share</th><th>Directory</th><th>Status</th><th></th></tr></thead><tbody>${state.shares.map(s=>`<tr><td><strong>${esc(s.name)}</strong><small><code>\\\\${esc(host)}\\${esc(s.name)}</code></small></td><td>${esc(state.directories.find(d=>d.id===s.directory_id)?.name||s.directory_id)}</td><td>${badge(s.enabled?'Enabled':'Disabled')}${state.share_status?`<small>Samba: ${esc(state.share_status.service)}</small>`:''}</td><td>${isAdmin()?btn('Edit','share',`data-id="${s.id}"`,'quiet')+btn('Remove','share-remove',`data-id="${s.id}"`,'quiet danger-text'):badge(s.mode==='rw'?'Read / write':'Read only')}</td></tr>`).join('')}</tbody></table></div>`:empty('No shares are available.'),observed(state.share_status?.observed_at))+panel('Directories & permissions',directoriesTable())+`<div class="notice">Samba uses a synchronized Linux account and a separately set Samba password. New file permissions inherit directory ACLs; existing files keep their ACLs.</div>`;
+    panel('Samba shares',(state.shares||[]).length?`<div class="table-scroll"><table><thead><tr><th>Share</th><th>Directory</th><th>Status</th><th></th></tr></thead><tbody>${state.shares.map(s=>`<tr><td><strong>${esc(s.name)}</strong><small><code>\\\\${esc(host)}\\${esc(s.name)}</code></small></td><td>${esc(state.directories.find(d=>d.id===s.directory_id)?.name||s.directory_id)}<small>${esc(volumeName(state.directories.find(d=>d.id===s.directory_id)?.volume_uuid))}</small></td><td>${badge(s.enabled?'Enabled':'Disabled')}${state.share_status?`<small>Samba: ${esc(state.share_status.service)}</small>`:''}</td><td>${isAdmin()?btn('Edit','share',`data-id="${s.id}"`,'quiet')+btn('Remove','share-remove',`data-id="${s.id}"`,'quiet danger-text'):badge(s.mode==='rw'?'Read / write':'Read only')}</td></tr>`).join('')}</tbody></table></div>`:empty('No shares are available.'),observed(state.share_status?.observed_at))+panel('Directories & permissions',directoriesTable())+`<div class="notice">Samba uses a synchronized Linux account and a separately set Samba password. New file permissions inherit directory ACLs; existing files keep their ACLs.</div>`;
 }
+const backupModeLabel=(mode,policy='keep')=>mode==='rolling'?(policy==='mirror'?'Rolling mirror':'Rolling copy (keep backup-only files)'):'Dated snapshots (hard links)';
 function backupsPage() {
-  return pageHeader('PROTECTION','A second copy. Peace of mind.','Dated snapshots on another disk, with transfer results and history.',isAdmin()?btn('New backup','backup','','primary'):'')+
-    panel('Backup jobs',state.backups.length?state.backups.map(b=>`<div class="backup-row"><div class="volume-icon">${icon('backups')}</div><div class="grow"><strong>${esc(b.name)}</strong><p>${esc(state.directories.find(d=>d.id===b.source_id)?.name||'Assigned source')} → ${esc(b.destination_name)}</p><small class="muted">${esc(b.schedule)} · Keep ${esc(b.retention)} completed snapshots · ${b.enabled?'Enabled':'Disabled'}</small></div>${isAdmin()?btn('Edit','backup',`data-id="${b.id}"`,'quiet')+btn('Run now','backup-run',`data-id="${b.id}"`,'primary'):''}${btn('Browse copies','backup-inspect',`data-id="${b.id}"`)}</div>`).join(''):empty('No backup jobs have been configured.'))+
+  return pageHeader('PROTECTION','A second copy. Peace of mind.','Back up to another disk with dated snapshots or one rolling copy.',isAdmin()?btn('New backup','backup','','primary'):'')+
+    panel('Backup jobs',state.backups.length?state.backups.map(b=>`<div class="backup-row"><div class="volume-icon">${icon('backups')}</div><div class="grow"><strong>${esc(b.name)}</strong><p>${esc(state.directories.find(d=>d.id===b.source_id)?directoryLabel(state.directories.find(d=>d.id===b.source_id)):'Assigned source')} → ${esc(b.destination_volume_name||volumeLabel(b.destination_uuid))} / ${esc(b.destination_name)}</p><small class="muted">${esc(backupModeLabel(b.mode,b.rolling_policy))} · ${esc(b.schedule)} · ${b.mode==='rolling'?'Single updated copy':`Keep ${esc(b.retention)} completed snapshots`} · ${b.enabled?'Enabled':'Disabled'}</small></div>${isAdmin()?btn('Edit','backup',`data-id="${b.id}"`,'quiet')+btn('Run now','backup-run',`data-id="${b.id}"`,'primary'):''}${btn('Browse copies','backup-inspect',`data-id="${b.id}"`)}</div>`).join(''):empty('No backup jobs have been configured.'))+
     panel('Execution history',jobs(30))+(isAdmin()?panel('Systemd schedules',`<pre>${esc(state.timers?.timers||'Schedule status has not been observed yet.')}</pre>`,observed(state.timers?.observed_at)):'')+
-    '<div class="notice">Each run creates a fresh snapshot. Source deletions never remove files from earlier copies. Retention removes only older completed snapshots after a successful run.</div>';
+    '<div class="notice">Dated snapshots preserve earlier copies using hard links. Rolling copies update one directory; their deletion policy decides whether backup-only files stay or are removed. Snapshot retention runs only after a successful dated backup.</div>';
 }
 function usersPage() {
   return pageHeader('ACCOUNTS','Everyone has their place.','Application access and Linux / Samba synchronization are explicit.',btn('Create user','user','','primary'))+panel('Users',`<div class="table-scroll"><table><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Linux / Samba</th><th></th></tr></thead><tbody>${state.users.map(u=>`<tr><td><strong>${esc(u.display_name)}</strong><small>${esc(u.username)}</small></td><td>${esc(u.role==='admin'?'Administrator':'Standard user')}</td><td>${badge(u.enabled?'Enabled':'Disabled')}</td><td>${badge(u.system_synced?'Synchronized':'Not synchronized')}</td><td>${u.id!==user.id?btn('Edit','user',`data-id="${u.id}"`,'quiet')+btn(u.enabled?'Disable':'Enable','user-state',`data-id="${u.id}"`,'quiet')+btn('Reset password','user-password',`data-id="${u.id}"`,'quiet'):''}${btn('Sync Samba','user-sync',`data-id="${u.id}"`,'quiet')}</td></tr>`).join('')}</tbody></table></div>`);
+}
+function networkInterfacesCard() {
+  const s=state.system;
+  return panel('Network interfaces',s?`<div class="facts">${(s.interfaces||[]).map(i=>`<div><strong>${esc(i.ifname)}${linkSpeedLabel(i)?`<small class="muted"> · ${esc(linkSpeedLabel(i))}</small>`:''}</strong><span>${esc(i.operstate)} · ${esc((i.addr_info||[]).map(a=>a.local+'/'+a.prefixlen).join(', '))}</span></div>`).join('')}</div>`:'',observed(s?.observed_at));
 }
 function systemPage() {
   const s=state.system;
   return pageHeader('SYSTEM','Keep your server in good shape.','Native services, package updates and deliberate power controls.',btn('Check APT updates','updates','','primary'))+
     panel('Server information',s?`<div class="facts">${[['Hostname',s.hostname],['Operating system',s.os],['Kernel',s.kernel],['Processor',s.cpu],['CPU utilization',cpuPercent==null?'Waiting for second observation':cpuPercent+'%'],['Load average',s.load.map(x=>x.toFixed(2)).join(' · ')],['Memory',bytes(s.memory.total-s.memory.available)+' / '+bytes(s.memory.total)],['Reboot recommendation',s.reboot_recommended?'Reboot recommended':'No reboot marker found']].map(([k,v])=>`<div><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('')}</div>`:empty('No system observation available.'),observed(s?.observed_at))+
-    panel('Network interfaces',s?`<div class="facts">${s.interfaces.map(i=>`<div><strong>${esc(i.ifname)}</strong><span>${esc(i.operstate)} · ${esc(i.addr_info.map(a=>a.local+'/'+a.prefixlen).join(', '))}</span></div>`).join('')}</div>`:'')+
+    networkInterfacesCard()+
     panel('Services',`<div class="facts">${['smbd','fail2ban','apache2'].map(name=>`<div><strong>${esc(name)}</strong><span>${badge(s?.services[name]||'Not observed')}${btn('Start','service',`data-service="${name}" data-kind="start"`,'quiet')}${btn('Restart','service',`data-service="${name}" data-kind="restart"`,'quiet')}</span></div>`).join('')}</div>`)+
     panel('Package updates',state.updates?`<p class="muted">Checked ${esc(when(state.updates.checked_at))}. Security labels are shown only when Debian origin metadata identifies them.</p>${state.updates.packages.length?`<div class="table-scroll"><table><thead><tr><th>Package</th><th>Installed</th><th>Candidate</th><th></th></tr></thead><tbody>${state.updates.packages.map(p=>`<tr><td>${esc(p.name)}</td><td><code>${esc(p.installed)}</code></td><td><code>${esc(p.candidate)}</code></td><td>${p.security?badge('Security update'):''}</td></tr>`).join('')}</tbody></table></div>${btn('Install available updates','install','','primary')}`:'<p>No upgrades in the last check. Check again for current availability.</p>'}`:empty('Check APT updates to fetch current package metadata.'))+
     panel('Power controls','<p>Review running jobs and connected USB disks before confirming. Power actions are scheduled with a 60-second delay.</p>'+btn('Reboot server','power','data-kind="reboot"')+btn('Shut down','power','data-kind="shutdown"','danger-text'))+panel('Recent operations',jobs());
@@ -169,13 +191,25 @@ function systemPage() {
 function networkPage() {
   const security=state.security;
   return pageHeader('NETWORK & SECURITY','Control what comes in.','nftables controls traffic. Fail2ban responds to suspicious activity.',btn('Inspect firewall','firewall-status','','primary'))+
+    networkInterfacesCard()+
     panel('Managed firewall','<p>Manage a dedicated nftables table. SSH and the configured management ports stay permitted. Changes must be confirmed within 90 seconds.</p>'+btn('Configure firewall','firewall')+'<p class="small muted">Other firewall tables remain independently managed and may impose additional restrictions.</p>')+
     panel('Fail2ban',security?`<div class="row">Service ${badge(security.service)}${btn('Refresh live status','f2b-status','','quiet')}${btn('Configure jail','jail','','quiet')}</div>${security.jails.length?security.jails.map(j=>`<div class="jail"><div class="row"><strong>${esc(j.name)}</strong><span>${esc(j.total_banned)} total bans</span><span>${esc(j.bantime)}s ban duration</span>${btn('Ban IP','ban',`data-jail="${esc(j.name)}"`)}</div><div>${j.banned_ips.length?j.banned_ips.map(ip=>`<div class="row"><code>${esc(ip)}</code>${btn('Unban','unban',`data-jail="${esc(j.name)}" data-ip="${esc(ip)}"`,'quiet')}</div>`).join(''):'<p class="muted small">No currently banned addresses.</p>'}</div></div>`).join(''):'<p>No active jails reported. Configure an existing Debian jail to enable it.</p>'}`:empty('Security status is not available yet.'),observed(security?.observed_at))+
-    panel('Recent security events',(state.events||[]).filter(e=>/security|firewall|fail2ban/.test(e.kind)).slice(0,20).map(e=>`<div class="alert-row">${badge(e.severity)}<p>${esc(e.message)}<small>${esc(when(e.created_at))}</small></p></div>`).join('')||empty('No security events recorded.'));
+    panel('Recent security events',(state.events||[]).filter(e=>notificationMatches(e,'security')).slice(0,20).map(e=>`<div class="alert-row">${badge(e.severity)}<p>${esc(e.message)}<small>${esc(when(e.created_at))}</small></p>${e.acknowledged?'<span class="muted small">Acknowledged</span>':btn('Acknowledge','ack',`data-id="${e.id}"`,'quiet')}</div>`).join('')||empty('No security events recorded.'),acknowledgeAllButton('security'));
 }
+const notificationMatches=(event,scope)=>scope==='attention'?event.severity!=='info':scope==='security'?/security|firewall|fail2ban/i.test(event.kind):true;
+const notificationCount=scope=>state.notification_summary?.[scope]??(state.events||[]).filter(e=>!e.acknowledged&&notificationMatches(e,scope)).length;
+const notificationBoundary=()=>state.notification_summary?.through_id??Math.max(0,...(state.events||[]).map(e=>Number(e.id)));
+const acknowledgeAllButton=scope=>notificationBoundary()?btn('Acknowledge all','ack-all',`data-scope="${scope}" ${notificationCount(scope)?'':'disabled'}`,'quiet small'):'';
+const linkSpeedLabel=interfaceInfo=>{
+  if(interfaceInfo.ifname==='lo'||interfaceInfo.link_type==='loopback'||!(interfaceInfo.link_active??String(interfaceInfo.operstate).toUpperCase()==='UP'))return '';
+  const speed=interfaceInfo.link_speed_mbps;
+  if(!Number.isFinite(speed)||speed<=0)return 'Link speed unavailable';
+  const [rate,unit]=speed>=1000000?[speed/1000000,'Tbps']:speed>=1000?[speed/1000,'Gbps']:[speed,'Mbps'];
+  return new Intl.NumberFormat(undefined,{maximumFractionDigits:3}).format(rate)+' '+unit;
+};
 function activityPage() {
   return pageHeader('ACTIVITY','A clear record of what happened.','Operations, security events and administrative actions.')+
-    panel('Notifications',state.events.length?state.events.map(e=>`<div class="alert-row">${badge(e.severity)}<p>${esc(e.message)}<small>${esc(e.kind)} · ${esc(when(e.created_at))}</small></p>${!e.acknowledged?btn('Acknowledge','ack',`data-id="${e.id}"`,'quiet'):'<span class="muted small">Acknowledged</span>'}</div>`).join(''):empty('No notifications yet.'))+panel('Operations',jobs(50))+
+    panel('Notifications',state.events.length?state.events.map(e=>`<div class="alert-row">${badge(e.severity)}<p>${esc(e.message)}<small>${esc(e.kind)} · ${esc(when(e.created_at))}</small></p>${!e.acknowledged?btn('Acknowledge','ack',`data-id="${e.id}"`,'quiet'):'<span class="muted small">Acknowledged</span>'}</div>`).join(''):empty('No notifications yet.'),acknowledgeAllButton('all'))+panel('Operations',jobs(50))+
     panel('Administrative audit',`<div class="table-scroll"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Detail</th></tr></thead><tbody>${state.audit.map(a=>`<tr><td>${esc(when(a.created_at))}</td><td>${esc(state.users.find(u=>u.id===a.actor_id)?.username||'System')}</td><td>${esc(a.action)}</td><td><details><summary>Inspect</summary><pre>${esc(a.details)}</pre></details></td></tr>`).join('')}</tbody></table></div>`);
 }
 function settingsPage() {
@@ -188,7 +222,14 @@ function render() {
   const views={dashboard,storage:storagePage,shares:sharesPage,backups:backupsPage,users:usersPage,system:systemPage,network:networkPage,activity:activityPage,settings:settingsPage};
   if(!isAdmin()&&!['dashboard','storage','shares','backups','settings'].includes(page)) page='dashboard';
   $('#content').innerHTML=(views[page]||dashboard)();
-  document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('selected',a.getAttribute('href')==='#'+page));
+  document.querySelectorAll('nav a').forEach(a=>{
+    const href=a.getAttribute('href');a.classList.toggle('selected',href==='#'+page);
+    if(href==='#activity') {
+      const dot=a.querySelector('.dot');
+      if(notificationCount('all')&&!dot)a.insertAdjacentHTML('beforeend','<i class="dot"></i>');
+      if(!notificationCount('all')&&dot)dot.remove();
+    }
+  });
   $('.breadcrumb').innerHTML=`Workspace <span>/</span> ${esc(nav.find(n=>n[0]===page)?.[1]||'Dashboard')}`;
 }
 async function refresh() {
@@ -225,17 +266,34 @@ async function clickAction(button) {
   if(a==='navigate') {location.hash=button.dataset.page;return;}
   if(a==='refresh') return refresh();
   if(a==='logout') {await api('logout',{});clearSessionView();return loginView();}
+  if(a==='storage-name') {
+    const kind=button.dataset.kind;
+    const item=kind==='disk'?state.devices?.devices.find(d=>d.type==='disk'&&d.stable_id===button.dataset.id):volumeInfo(button.dataset.id);
+    if(!item)throw Error('Refresh Storage before naming this device.');
+    const current=kind==='disk'?item.disk_custom_name:item.custom_name;
+    return dialog(kind==='disk'?'Name this disk':'Name this volume',`<p><strong>${esc(kind==='disk'?(item.disk_display_name||item.model||item.path):volumeName(button.dataset.id))}</strong><br><small>${esc(button.dataset.id)}</small></p>${field('Kind','kind','hidden',kind)}${field('Identifier','id','hidden',button.dataset.id)}${field('Display name','name','text',current||'','maxlength="80" autocomplete="off" placeholder="e.g. Archive or Backup drive"')}<p class="small muted">Use this name throughout YANP Nas. Leave it blank to clear the custom name. Disk names also identify their volumes unless a volume has its own name. Filesystem labels, UUIDs and mount paths stay unchanged.</p>`,'storage-name','Save name');
+  }
+  if(a==='initialize'||a==='finish-format') {
+    const finishing=a==='finish-format';
+    const part=finishing?state.devices?.devices.find(p=>p.partuuid===button.dataset.id):null;
+    const parent=part?state.devices?.devices.find(d=>d.type==='disk'&&part.physical_disks?.includes(d.path)):null;
+    if(finishing&&!parent)throw Error('Refresh Storage before finishing this partition.');
+    const plan=await api('action',{operation:finishing?'storage.format_plan':'storage.initialize_plan',params:finishing?{stable_id:parent.stable_id,partition_uuid:part.partuuid.toLowerCase()}:{stable_id:button.dataset.id}});
+    const d=plan.device,defaultFs=plan.filesystem||'ext4',choices=['ext4','btrfs','ntfs'].filter(fs=>!finishing||plan.filesystems.includes(fs));
+    const explanation=finishing?`<p>The data partition already exists. This action finishes formatting <strong>${esc(plan.partition.path)}</strong>; the partition table is kept.</p>`:'<p>One action, two steps:</p><ol><li>Create the GPT partition table and one data partition.</li><li>Format and verify that partition with your selected filesystem.</li></ol>';
+    return dialog(finishing?'Finish formatting data partition':'Initialize empty disk',`<p><strong>${esc(d.model||d.path)}</strong> · ${bytes(d.size)}</p><p>Device: <code>${esc(d.path)}</code><br>Serial: <strong>${esc(d.serial||'Unavailable')}</strong><br><small>${esc(d.stable_id)} · ${esc(d['log-sec'])}-byte sectors</small></p><div class="notice">${explanation}<p>This writes disk metadata and can destroy undetected data. Use only storage you intend to initialize. Detected filesystems are refused; existing data partitions are never replaced.</p></div>${select('Filesystem','filesystem',choices.map(fs=>[fs,fs===defaultFs?fs+' (default)':fs]),plan.filesystem||'ext4','required')}${field('Device','stable_id','hidden',d.stable_id)}${finishing?field('Partition','partition_uuid','hidden',part.partuuid.toLowerCase()):''}${field('Fingerprint','fingerprint','hidden',plan.fingerprint)}${field('Observed','observed_at','hidden',plan.observed_at)}${field('Type '+plan.confirmation,'confirmation','text','','required autocomplete="off"')}<label class="check"><input type="checkbox" name="acknowledge_erase" required>I confirm this is the correct empty disk/partition and accept the data-loss risk.</label><p class="small muted">The confirmation expires after five minutes. When formatting completes, mount the new filesystem from Storage. NTFS uses ntfs-3g and initially offers a read-only mount; you can explicitly enable write access when mounting.</p>`,'initialize',finishing?'Format partition':'Create partition & format');
+  }
   if(a==='mount') {
     const volume=state.devices?.devices.find(d=>d.uuid===button.dataset.id);
     if(!volume?.can_mount)throw Error(volume?.mount_block_reason||'Device state changed. Refresh and select the volume again.');
     const ntfs=volume.mount_driver==='ntfs-3g';
-    dialog('Mount existing filesystem',`<p><strong>${esc(volume.path)}</strong> · ${esc(volume.fstype)} · ${bytes(volume.size)}</p><p>Mount this existing filesystem without formatting or repartitioning it.</p>${field('Filesystem UUID','uuid','text',button.dataset.id,'readonly')}${check('Mount read-only','read_only',!!volume.default_read_only)}${ntfs?'<div class="notice">NTFS uses ntfs-3g. Read-only is the default. Hibernated or unclean Windows volumes will not be forced writable.</div><div data-linux-permissions>'+check('Allow Linux ownership and permissions on this volume’s root','allow_linux_permissions',false)+'<p class="small muted">Required for NTFS read/write. Restricts write access on the volume root and enables per-user ACLs for new managed directories. Existing files are not changed recursively. This is not a Windows account mapping.</p></div>':''}${check('Mount automatically after reboot','persistent',false)}`,'mount','Mount');
+    dialog('Mount existing filesystem',`<p><strong>${esc(volumeName(volume.uuid))}</strong> · ${esc(volume.path)} · ${esc(volume.fstype)} · ${bytes(volume.size)}</p><p>Mount this existing filesystem without formatting or repartitioning it.</p>${field('Filesystem UUID','uuid','text',button.dataset.id,'readonly')}${check('Mount read-only','read_only',!!volume.default_read_only)}${ntfs?'<div class="notice">NTFS uses ntfs-3g. Read-only is the default. Hibernated or unclean Windows volumes will not be forced writable.</div><div data-linux-permissions>'+check('Allow Linux ownership and permissions on this volume’s root','allow_linux_permissions',false)+'<p class="small muted">Required for NTFS read/write. Restricts write access on the volume root and enables per-user ACLs for new managed directories. Existing files are not changed recursively. This is not a Windows account mapping.</p></div>':''}${check('Mount automatically after reboot','persistent',false)}`,'mount','Mount');
     const readonly=$('#dialog input[name="read_only"]');
     if(volume.ro){readonly.checked=true;readonly.disabled=true;}
     const update=()=>{const controls=$('#dialog [data-linux-permissions]');if(controls){controls.hidden=readonly.checked;$('input',controls).required=!readonly.checked;}};
     readonly.addEventListener('change',update);update();return;
   }
-  if(a==='unmount') return dialog('Unmount volume',`<p>Close files and disconnect share clients first. Linux refuses busy volumes.</p>${field('UUID','uuid','text',button.dataset.id,'readonly')}`,'unmount','Unmount');
+  if(a==='unmount') return dialog('Unmount volume',`<p><strong>${esc(volumeName(button.dataset.id))}</strong></p><p>Close files and disconnect share clients first. Linux refuses busy volumes.</p>${field('UUID','uuid','text',button.dataset.id,'readonly')}`,'unmount','Unmount');
   if(a==='directory') {if(!optionsVolumes(true).length)throw Error('Mount a supported data volume read/write before creating a directory.');return dialog('Create managed directory',select('Writable mounted volume','uuid',optionsVolumes(true))+field('Directory name','name','text','','required maxlength="80"'),'directory','Create');}
   if(a==='rename') { const d=state.directories.find(d=>d.id===id); return dialog('Rename directory',field('ID','id','hidden',id)+field('New name','name','text',d.name,'required maxlength="80"')+'<p class="small muted">Remove its Samba share before renaming, then recreate the share.</p>','rename','Rename'); }
   if(a==='permissions') {
@@ -261,12 +319,22 @@ async function clickAction(button) {
   if(a==='backup') {
     if(!optionsDirs().length||(!id&&optionsVolumes().length<2))throw Error('Create a source directory and mount a second volume before configuring a backup.');
     const b=state.backups.find(b=>b.id===id)||{};wizardStep=0;
-    dialog(b.id?'Edit backup':'Create a backup',`${b.id?field('ID','id','hidden',b.id):''}<div class="wizard-progress">1 · Source　 /　 2 · Destination　 /　 3 · Schedule</div><section data-step="0">${field('Backup name','name','text',b.name||'','required maxlength="80"')}${select('Source directory','source_id',optionsDirs(),b.source_id)}<p class="small muted">A source must be a managed directory on a mounted volume.</p></section><section data-step="1" hidden>${select('Destination volume','destination_uuid',optionsKnownVolumes(),b.destination_uuid)}${field('Destination folder name','destination_name','text',b.destination_name||'daily-copy','required maxlength="80"')}<p class="small muted">Choose a different physical filesystem from the source. Copies live in the protected .yanp-backups directory.</p></section><section data-step="2" hidden>${select('Schedule','schedule',[['manual','Manual only'],['hourly','Hourly'],['daily','Daily'],['weekly','Weekly']],b.schedule||'daily')}${field('Completed snapshots to keep','retention','number',b.retention||7,'min="1" max="365" required')}${check('Enable this backup','enabled',b.id?!!b.enabled:true)}${select('Optional backup owner','owner_id',[['','Administrator only'],...state.users.map(u=>[u.id,u.display_name])],b.owner_id||'')}${check('Allow owner to view backup and contents','allow_owner_view',!!b.allow_owner_view)}<div class="notice">No mirror deletion. Older completed snapshots are removed only after a successful run, according to retention.</div></section><div class="wizard-buttons">${btn('Back','wizard-back','','quiet')}${btn('Next →','wizard-next','','primary')}</div>`,'backup','Save backup');
-    updateWizard();return;
+    dialog(b.id?'Edit backup':'Create a backup',`${b.id?field('ID','id','hidden',b.id):''}<div class="wizard-progress">1 · Source　 /　 2 · Destination　 /　 3 · Schedule</div><section data-step="0">${field('Backup name','name','text',b.name||'','required maxlength="80"')}${select('Backup mode','mode',[['hardlink','Dated snapshots (hard links)'],['rolling','Rolling copy (single backup)']],b.mode||'hardlink')}<p class="small muted">Dated snapshots copy everything initially, then share unchanged files with the previous successful snapshot. Each date remains a complete backup. A rolling copy updates one directory without dated history. Both modes scan and compare the source files.</p>${select('Source directory','source_id',optionsDirs(),b.source_id)}<p class="small muted">A source must be a managed directory on a mounted volume.</p></section><section data-step="1" hidden>${select('Destination volume','destination_uuid',optionsKnownVolumes(),b.destination_uuid)}${field('Destination folder name','destination_name','text',b.destination_name||'daily-copy','required maxlength="80"')}<p class="small muted">Choose a different physical filesystem from the source. Copies live in the protected .yanp-backups directory.</p></section><section data-step="2" hidden>${select('Schedule','schedule',[['manual','Manual only'],['hourly','Hourly'],['daily','Daily'],['weekly','Weekly']],b.schedule||'daily')}<div data-snapshot-retention>${field('Completed snapshots to keep','retention','number',b.retention||7,'min="1" max="365" required')}</div><div data-rolling-policy hidden>${select('Files removed from the source','rolling_policy',[['keep','Keep backup-only files'],['mirror','Delete backup-only files (mirror)']],b.rolling_policy||'keep')}</div><p class="notice" data-rolling-note hidden></p>${check('Enable this backup','enabled',b.id?!!b.enabled:true)}${select('Optional backup owner','owner_id',[['','Administrator only'],...state.users.map(u=>[u.id,u.display_name])],b.owner_id||'')}${check('Allow owner to view backup and contents','allow_owner_view',!!b.allow_owner_view)}<div class="notice">Dated snapshot retention removes older completed snapshots only after a successful run. Rolling copies keep one updated directory without dated history.</div></section><div class="wizard-buttons">${btn('Back','wizard-back','','quiet')}${btn('Next →','wizard-next','','primary')}</div>`,'backup','Save backup');
+    $('#dialog select[name="mode"]').addEventListener('change',updateBackupMode);$('#dialog select[name="rolling_policy"]').addEventListener('change',updateBackupMode);updateBackupMode();updateWizard();return;
   }
   if(a==='wizard-next'||a==='wizard-back') {if(a==='wizard-next'){const section=$(`[data-step="${wizardStep}"]`);for(const el of section.querySelectorAll('input,select'))if(!el.reportValidity())return;}wizardStep+=a==='wizard-next'?1:-1;updateWizard();return;}
   if(a==='backup-run') return action('backup.run',{id});
   if(a==='backup-inspect') return browseBackup(id,button.dataset.snapshot||'',button.dataset.path||'');
+  if(a==='backup-measure') {
+    button.disabled=true;
+    try {
+      const params={id,...(button.dataset.snapshot?{snapshot:button.dataset.snapshot}:{}),...(button.dataset.path?{path:button.dataset.path}:{})};
+      const queued=await api('action',{operation:'backup.measure',params});
+      const job=await api('action',{operation:'job.read',params:{id:queued.job_id}});
+      dialog('Backup disk usage',`<div id="job-detail" data-job="${esc(job.id)}" data-status="${esc(job.status)}">${jobDetail(job)}</div>`);
+    } finally {if(button.isConnected)button.disabled=false;}
+    return;
+  }
   if(a==='backup-restore') {if(!optionsVolumes(true).length)throw Error('Mount a target volume read/write before restoring files.');return dialog('Copy snapshot into a new directory',field('Backup','id','hidden',id)+field('Snapshot','snapshot','text',button.dataset.snapshot,'readonly')+select('Target writable volume','target_uuid',optionsVolumes(true))+field('New directory name','name','text','restored-copy','required')+field('Type COPY SNAPSHOT','confirmation','text','','required placeholder="COPY SNAPSHOT"'),'restore','Copy back');}
   if(a==='user') {
     const u=state.users.find(u=>u.id===id);
@@ -304,14 +372,42 @@ async function clickAction(button) {
   if(a==='ban') return dialog('Ban IP address',field('Jail','jail','text',button.dataset.jail,'readonly')+field('IP address','ip','text','','required'),'ban','Ban address');
   if(a==='unban') return action('fail2ban.unban',{jail:button.dataset.jail,ip:button.dataset.ip});
   if(a==='jail') return dialog('Configure existing Fail2ban jail',field('Existing jail name','jail','text','sshd','required')+check('Enable jail','enabled',true)+field('Ban duration (seconds)','bantime','number',3600,'min="60" max="604800" required')+field('Detection window (seconds)','findtime','number',600,'min="60" max="604800" required')+field('Attempts before ban','maxretry','number',5,'min="1" max="100" required')+'<p class="small muted">Uses the systemd journal backend and existing Debian filters/actions. Configuration is tested before reload.</p>','jail','Validate & apply');
+  if(a==='ack-all') {
+    const through_id=notificationBoundary();if(!through_id)return;
+    button.disabled=true;
+    try {await api('action',{operation:'event.ack_all',params:{scope:button.dataset.scope,through_id}});await refresh();toast('Notifications acknowledged.');}
+    finally {if(button.isConnected)button.disabled=false;}
+    return;
+  }
   if(a==='ack') return action('event.ack',{id});
   if(a==='monitoring') {const profile=button.dataset.profile;if(profile!=='custom')return action('monitoring.save',{profile});return dialog('Custom monitoring intervals',Object.entries({capacity:30,smart:900,shares:15,services:15,backups:15,reconcile:30}).map(([k,min])=>field(k+' (seconds)','monitor_'+k,'number',state.monitoring[k],`min="${min}" max="${k==='smart'?604800:86400}" required`)).join(''),'monitoring','Save intervals');}
 }
+function updateBackupMode() {
+  const rolling=$('#dialog select[name="mode"]').value==='rolling',mirror=$('#dialog select[name="rolling_policy"]').value==='mirror';
+  $('#dialog [data-snapshot-retention]').hidden=rolling;
+  $('#dialog [data-rolling-policy]').hidden=!rolling;
+  const note=$('#dialog [data-rolling-note]');note.hidden=!rolling;
+  note.textContent='A rolling copy has no dated history or rollback. A failed run can leave it partially updated. '+(mirror?'Mirror mode deletes backup files that no longer exist in the source.':'Keep mode retains backup-only files; files still present at the same source path can be updated or replaced.')+' Existing dated snapshots are kept when switching modes.';
+}
 function updateWizard() {document.querySelectorAll('[data-step]').forEach(s=>s.hidden=Number(s.dataset.step)!==wizardStep);$('[data-action="wizard-back"]').disabled=wizardStep===0;$('[data-action="wizard-next"]').hidden=wizardStep===2;$('#dialog button[type="submit"]').hidden=wizardStep!==2;}
-function jobDetail(j) {return `<div class="row">${badge(j.status)}<code>${esc(j.id)}</code></div><p>${esc(j.operation)} · ${esc(when(j.started_at))} → ${esc(when(j.ended_at))}</p>${j.error?`<div class="notice warning">${esc(j.error)}</div>`:''}<h3>Result</h3><pre>${esc(j.result||(['running','queued'].includes(j.status)?'Waiting for completion':'No result recorded'))}</pre><h3>Command output</h3><pre>${esc(j.log||'No output recorded')}</pre>`;}
+function jobDetail(j) {if(j.operation==='backup.measure')return backupMeasurementDetail(j);return `<div class="row">${badge(j.status)}<code>${esc(j.id)}</code></div><p>${esc(j.operation)} · ${esc(when(j.started_at))} → ${esc(when(j.ended_at))}</p>${j.error?`<div class="notice warning">${esc(j.error)}</div>`:''}<h3>Result</h3><pre>${esc(j.result||(['running','queued'].includes(j.status)?'Waiting for completion':'No result recorded'))}</pre><h3>Command output</h3><pre>${esc(j.log||'No output recorded')}</pre>`;}
+function backupMeasurementDetail(job) {
+  const result=typeof job.result==='string'?JSON.parse(job.result||'{}'):job.result||{};
+  const status=`<div class="row">${badge(job.status)}</div>`;
+  if(job.status==='failed')return status+`<div class="notice warning">${esc(job.error||'Disk usage calculation failed. No complete total is available.')}</div>`;
+  if(job.status!=='completed')return status+`<p>${job.status==='queued'?'Waiting to calculate disk usage…':'Calculating allocated disk usage…'}</p><p class="small muted">Large backups can take several minutes. You may close this window and view the result in Activity. Storage operations wait for the calculation to finish.</p>`;
+  return status+`<h3>${esc(contentBytes(result.allocated_bytes))} on disk</h3><p><code>${esc(result.selection)}</code></p><p class="small muted">Measured ${esc(when(result.measured_at))}. Hard links are counted once within this selection. Individual snapshot totals can overlap; measure all backup copies together for their combined footprint.</p>`+btn('Back to backup contents','backup-inspect',`data-id="${result.backup_id}" data-snapshot="${esc(result.snapshot||'')}" data-path="${esc(result.path||'')}"`);
+}
+const measureBackupButton=(id,snapshot='',path='',label='Calculate disk usage')=>isAdmin()?btn(label,'backup-measure',`data-id="${id}" data-snapshot="${esc(snapshot)}" data-path="${esc(path)}"`,'quiet small'):'';
+const backupEntryDate = entry => {
+  if(entry.date==null||!Number.isFinite(entry.date))return '';
+  const date=new Date(entry.date*1000);if(!Number.isFinite(date.getTime()))return '';
+  const label=({completed:'Completed',started:'Started',modified:'Modified'})[entry.date_kind]||'Modified';
+  return `<small class="muted">${esc(label)} ${esc(when(date.toISOString()))}</small>`;
+};
 async function browseBackup(id,snapshot='',path='') {
   const r=await api('action',{operation:'backup.inspect',params:{id,...(snapshot?{snapshot}:{}),...(path?{path}:{})}});
-  dialog('Backup contents',`<p><code>${esc(r.path||'Snapshots')}</code></p>${snapshot?btn('All snapshots','backup-inspect',`data-id="${id}"`,'quiet'):''}${snapshot&&isAdmin()?btn('Copy this snapshot back','backup-restore',`data-id="${id}" data-snapshot="${esc(snapshot)}"`,'primary'):''}<div class="table-scroll"><table><thead><tr><th>Name</th><th>Type</th><th>Size</th></tr></thead><tbody>${r.entries.map(e=>`<tr><td>${e.directory?btn(e.name,'backup-inspect',`data-id="${id}" data-snapshot="${esc(snapshot||e.name)}" data-path="${esc(snapshot?[path,e.name].filter(Boolean).join('/'): '')}"`,'quiet'):esc(e.name)}</td><td>${e.symlink?'Symlink (not followed)':e.directory?'Directory':'File'}</td><td>${bytes(e.bytes)}</td></tr>`).join('')}</tbody></table></div><p class="small muted">Up to ${r.limit} entries shown. Symlinks are not followed.</p>`);
+  dialog('Backup contents',`<p><code>${esc(r.path||'Snapshots')}</code></p>${snapshot?btn('All backups','backup-inspect',`data-id="${id}"`,'quiet'):''}${measureBackupButton(id,snapshot,path,snapshot?'Calculate disk usage':'Calculate total disk usage')}${snapshot&&isAdmin()&&r.complete!==false?btn(snapshot==='current'?'Copy rolling backup back':'Copy this snapshot back','backup-restore',`data-id="${id}" data-snapshot="${esc(snapshot)}"`,'primary'):''}${r.note?`<div class="notice">${esc(r.note)}</div>`:''}<div class="table-scroll"><table><thead><tr><th>Name</th><th>Type</th><th>Content size</th></tr></thead><tbody>${r.entries.map(e=>`<tr><td>${e.directory?btn(!snapshot&&e.name==='current'?'Current backup':e.name,'backup-inspect',`data-id="${id}" data-snapshot="${esc(snapshot||e.name)}" data-path="${esc(snapshot?[path,e.name].filter(Boolean).join('/'): '')}"`,'quiet'):esc(e.name)}${backupEntryDate(e)}</td><td>${e.symlink?'Symlink (not followed)':e.directory?'Directory':'File'}</td><td>${e.symlink?'—':contentBytes(e.bytes)}${e.directory?`<small>${measureBackupButton(id,snapshot||e.name,snapshot?[path,e.name].filter(Boolean).join('/'):'')}</small>`:''}</td></tr>`).join('')}</tbody></table></div><p class="small muted">Up to ${r.limit} entries shown. Symlinks are not followed.</p><p class="small muted">Sizes are logical file lengths, including nested files in directories. Hard-linked snapshots share storage; these sizes cannot be added to measure disk usage. Large, changing or unreadable folders may show “Not calculated”. ${isAdmin()?'Use Calculate disk usage for a full allocated-space measurement that runs in the background.':'Open a smaller folder to inspect its entries.'}</p>`);
 }
 async function submit(form) {
   const p=Object.fromEntries(new FormData(form)), type=form.dataset.form;
@@ -320,10 +416,25 @@ async function submit(form) {
   if(type==='setup') {await api('setup',p);toast('Administrator created. Sign in to continue.');return loginView();}
   if(type==='user-create'||type==='user-edit')return saveUser(form,p);
   if(type==='share')return saveShare(form,p);
+  if(type==='initialize') {
+    if(form.dataset.initializationAttempted)return;
+    form.dataset.initializationAttempted='true';
+    try {
+      if(form.dataset.pendingJob)throw Error('Check the pending initialization in Activity before continuing.');
+      progress(form,p.partition_uuid?'Formatting the existing data partition…':'Step 1 of 2: Creating the partition table and data partition…');
+      await completedAction(p.partition_uuid?'storage.format_partition':'storage.initialize',{...(p.partition_uuid?{partition_uuid:p.partition_uuid}:{}),stable_id:p.stable_id,fingerprint:p.fingerprint,observed_at:Number(p.observed_at),filesystem:p.filesystem,confirmation:p.confirmation,acknowledge_erase:checked('acknowledge_erase')},form);
+      progress(form,p.partition_uuid?`Partition formatted as ${p.filesystem}. Mount it from Storage.`:`Disk initialized. Both steps completed: partition created and formatted as ${p.filesystem}. Mount it from Storage.`);
+    } finally {
+      finishInitialization(form);
+      try{await refresh();}catch(e){toast('Could not refresh Storage. Refresh it before another disk action. '+e.message,true);}
+    }
+    return;
+  }
   let op, args=p, route=null;
-  const direct={mount:'storage.mount',unmount:'storage.unmount',directory:'directory.create',rename:'directory.rename',permissions:'directory.access',share:'share.save','share-remove':'share.remove',backup:'backup.save',restore:'backup.restore','user-sync':'account.sync','user-state':'account.state',install:'system.install',firewall:'firewall.change',ban:'fail2ban.ban',jail:'fail2ban.configure',monitoring:'monitoring.save'};
+  const direct={'storage-name':'storage.name',mount:'storage.mount',unmount:'storage.unmount',directory:'directory.create',rename:'directory.rename',permissions:'directory.access',share:'share.save','share-remove':'share.remove',backup:'backup.save',restore:'backup.restore','user-sync':'account.sync','user-state':'account.state',install:'system.install',firewall:'firewall.change',ban:'fail2ban.ban',jail:'fail2ban.configure',monitoring:'monitoring.save'};
   op=direct[type];
   if(['user-create','user-edit','user-password','password'].includes(type)) route={'user-create':'users.create','user-edit':'users.edit','user-password':'users.password',password:'password'}[type];
+  if(type==='storage-name'){await completedAction('storage.name',p,form);await refresh();closeDialog(true);return;}
   ['id','directory_id','source_id','retention','bantime','findtime','maxretry'].forEach(k=>{if(k in args)args[k]=Number(args[k]);});
   if(type==='mount'){args.persistent=checked('persistent');args.read_only=checked('read_only');args.allow_linux_permissions=checked('allow_linux_permissions');}
   if(type==='share'||type==='backup'||type==='firewall'||type==='jail')args.enabled=checked('enabled');
@@ -333,6 +444,7 @@ async function submit(form) {
   if(type==='power'){op='system.'+p.kind;args={confirmation:p.confirmation,warnings_acknowledged:checked('warnings_acknowledged')};}
   if(type==='firewall') {args.ports=p.ports.split('\n').filter(l=>l.trim()).map(l=>{const m=l.trim().match(/^(tcp|udp)\s+(\d+)$/);if(!m)throw Error('Use one port per line, for example tcp 445');return {protocol:m[1],port:Number(m[2])};});args.sources=p.sources.split('\n').map(l=>l.trim()).filter(Boolean);}
   if(type==='monitoring')args={profile:'custom',...Object.fromEntries(Object.entries(p).map(([k,v])=>[k.slice(8),Number(v)]))};
+  if(type==='backup'){await completedAction('backup.save',args,form);await refresh();closeDialog(true);toast('Backup saved.');return;}
   if(route){await api(route,args);toast('Saved');await refresh();}else await action(op,args);
   closeDialog(true);
 }
@@ -388,12 +500,13 @@ async function saveShare(form,p) {
 document.addEventListener('click',event=>{const button=event.target.closest('button[data-action]');if(!button)return;event.preventDefault();clickAction(button).catch(e=>toast(e.message,true));});
 async function handleFormSubmit(event) {
   const form=event.target.closest('form[data-form]');if(!form)return;event.preventDefault();if(form.dataset.busy)return;
+  if(form.dataset.initializationFinished){closeDialog();return;}
   const button=$('button[type="submit"]',form);form.dataset.busy='true';form.setAttribute('aria-busy','true');button.disabled=true;
   const controls=[...form.querySelectorAll('input,select,textarea,button,a')];
   for(const control of controls)control.inert=true;
   const error=$('[data-form-error]',form)||$('#login-error');if(error)error.textContent='';
   try{await submit(form);}catch(e){progress(form,'');const message=e.message+(['user-create','user-edit','share'].includes(form.dataset.form)?' Any completed steps remain applied; correct the error and retry.':'');if(error)error.textContent=message;else toast(message,true);}
-  finally{delete form.dataset.busy;form.removeAttribute('aria-busy');button.disabled=false;for(const control of controls)control.inert=false;}
+  finally{delete form.dataset.busy;form.removeAttribute('aria-busy');button.disabled=false;for(const control of controls)control.inert=false;if(form.dataset.initializationFinished)$('.modal-actions button',form)?.focus();}
 }
 document.addEventListener('submit',handleFormSubmit);
 document.addEventListener('keydown',event=>{

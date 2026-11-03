@@ -6,8 +6,11 @@ Use Debian 13 (Trixie) with systemd and working native APT repositories, on the
 HP ProLiant MicroServer Gen8 or another Linux system with equivalent access to
 its disks. Install the OS before attaching irreplaceable data. Have console or
 iLO access when validating new storage and firewall behavior. This release
-manages existing ext4, XFS, Btrfs and NTFS filesystems; it does not create filesystems,
-edit partition tables, manage RAID, unlock encryption, or import external mounts.
+manages existing ext4, XFS, Btrfs and NTFS filesystems. A separately confirmed
+Storage action can initialize an empty disk with GPT and ext4 (default), Btrfs or NTFS. It never replaces
+existing data partitions or detected filesystem/RAID/encryption signatures,
+manages RAID, unlocks encryption or
+imports external mounts. See [STORAGE.md](STORAGE.md).
 
 The installer requires root, an unoccupied `/opt/yanp-nas` and no existing
 `/etc/yanp-nas/web.json`. Apache is dedicated to NAS management on TCP 80/443.

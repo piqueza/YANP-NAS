@@ -1,5 +1,104 @@
 # Existing partitions and NTFS
 
+## Disk and volume display names
+
+In Storage, use **Name disk** on a disk card, or **Name volume** beside a
+filesystem. Enter a name such as `Archive` or `Backup drive`. Use **Rename** to
+change it, or save a blank name to clear it. A disk name is inherited by its
+volumes unless a volume has its own name. Names accept up to 80 characters,
+including spaces, punctuation and Unicode; control characters are refused.
+
+Names appear in the dashboard, Storage, directory/share choices, backup source
+and destination choices, and restore targets. UUIDs remain available as secondary
+identifiers; selectors keep a short UUID suffix to distinguish similar names.
+Registered disconnected backup destinations retain their display name.
+
+These are YANP management names, stored in the existing database settings. They
+do not write filesystem labels, rename directories, change mount paths or alter
+Samba/backup identities. Disk names use stable by-id identifiers; volume names
+use filesystem UUIDs. They survive restarts, updates, and reconnection under the
+same stable identifiers. Reformatting creates a new filesystem UUID, so a new
+volume inherits the disk name instead of the old volume-specific override.
+A fresh reinstall that discards the application database also discards names.
+
+Only administrators may edit names. Standard users receive names for their
+assigned volumes and assigned backup destinations; unrelated saved names and
+hardware identifiers are not added to their state. Duplicate filesystem UUIDs
+cannot be named as one volume. Naming does not change mount/access eligibility.
+
+## Initialize an empty disk
+
+A disk with neither a partition table nor a filesystem has nothing to mount.
+Eligible whole disks now show **Initialize empty disk…** in Storage. Opening it
+performs read-only live signature checks and shows the model, serial, capacity,
+stable identifier and logical sector size. Confirm the correct device, type the
+displayed `INITIALIZE ...` phrase exactly and acknowledge the data-loss risk.
+Choose **ext4** (default), **btrfs** or **ntfs** from the Filesystem dropdown.
+The confirmation expires after five minutes, including time spent in the queue.
+
+This is **one confirmed action with two automatic stages**, shown in progress:
+1. Create the GPT partition table and one data partition.
+2. Format and verify the selected filesystem on that partition.
+
+Success is reported only after both stages complete. The dialog stays open with
+its result and a single **OK** dismissal button after success or failure; it
+cannot resubmit the initialization. Uncertain/running jobs must be checked in
+Activity before any new action.
+
+Initialization writes **GPT + one data partition** in the selected filesystem,
+using the disk's real logical sector size and 4 KiB filesystem blocks/clusters.
+The start/end offsets are chosen by native `sfdisk` from the usable GPT range
+and device I/O topology. A fixed 1 MiB start is not imposed: some USB bridges
+report a much larger optimal I/O size and require a larger starting offset.
+NTFS uses the Microsoft basic data GPT type and native `mkntfs`; ext4 and Btrfs
+use the Linux filesystem GPT type. Btrfs uses a single-device filesystem.
+After the job completes, refresh Storage and mount the new partition with its
+normal Mount action. New NTFS volumes follow the same read-only default and
+explicit writable Linux permission approval described below.
+Automatic mount/boot persistence are separate explicit choices. This works for
+internal or USB empty disks of at least 256 MiB with a stable by-id identity.
+
+The agent refuses OS disks, any mounted disk, existing partitions/mappings,
+read-only devices, active holders and detected filesystem/RAID/encryption
+signatures. A disk with an existing GPT is eligible only when live `sfdisk`
+inspection verifies it has no partitions and probes find only matching GPT/PMBR
+metadata. Deleting the last partition in fdisk can leave this empty table;
+there is no stored "initialized" flag. Other partition-table types are refused. It repeats live probes before writes, checks kernel disk generation
+and validates the newly generated partition UUID and physical parent before
+formatting. No force-format or signature-erasure switch is used. A filesystem
+occupying the whole disk should be mounted directly instead of initialized.
+
+**No signature does not prove the absence of valuable data.** Raw data and
+damaged/unrecognized filesystems may be undetectable. Initialize only a disk you
+know can be overwritten. There is no existing-data resize/repartition/wipe flow.
+If creation partially fails, the job records that the table or filesystem may
+have been written. No rollback, erase or destructive retry is attempted; inspect
+the disk locally.
+
+If the single empty partition named `YANP data` remains after an interrupted
+initialization, Storage offers **Finish formatting…**. It has a fresh preview,
+five-minute confirmation, typed `FORMAT <partition UUID>` phrase and data-loss
+acknowledgement. It formats only that partition; it never recreates the table.
+Both parent and partition must be unmounted, unprotected and free of holders;
+additional partitions/mappings and detected content are refused. The existing
+GPT type limits the choice to ext4/Btrfs for Linux data or NTFS for Microsoft
+basic data. This is a narrow completion path, not a general partition editor.
+`blkid --no-part-details` excludes enclosing `PART_ENTRY_*` information from
+blank checks while retaining filesystem, RAID, encryption and nested-table
+probes. A GPT entry by itself is not a filesystem.
+
+Do not unplug the disk or run another disk-management tool
+during the job. Native dependencies are `fdisk`, `e2fsprogs`, `btrfs-progs`, `ntfs-3g`,
+`util-linux` and `udev`, installed by the installer/updater.
+
+Implementation references: Debian's [sfdisk](https://manpages.debian.org/trixie/fdisk/sfdisk.8.en.html),
+[wipefs](https://manpages.debian.org/trixie/util-linux/wipefs.8.en.html) and
+[mke2fs](https://manpages.debian.org/trixie/e2fsprogs/mke2fs.8.en.html),
+[mkfs.btrfs](https://manpages.debian.org/trixie/btrfs-progs/mkfs.btrfs.8.en.html) and
+[mkntfs](https://manpages.debian.org/trixie/ntfs-3g/mkntfs.8.en.html) manuals.
+
+## Mount existing filesystems
+
 YANP Nas mounts existing ext4, XFS, Btrfs and NTFS filesystems without formatting
 or changing partition tables. Each eligible partition has its own **Mount…**
 button in Storage. Whole disks that contain partitions, empty/reserved partitions,

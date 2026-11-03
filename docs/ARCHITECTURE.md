@@ -30,6 +30,13 @@ outside `web/public` are never under the DocumentRoot.
 
 ## Agent transport and queue
 
+Bulk event acknowledgement is an administrator-only synchronous action with an
+allowlisted scope and bound event-ID cutoff. Counts cover older events beyond
+the displayed page. Validation precedes audit storage; subsequent arrivals are
+not consumed by the request. Interface observations read carrier and speed from
+Linux sysfs without changing network configuration. Per-driver read failures
+leave the rate unavailable rather than failing the whole system observation.
+
 The agent is the sole privileged component. It has no network management listener.
 The Unix socket is root:`yanp-web` 0660 inside a 0750 runtime directory. Each
 request has an HMAC over its exact payload, a 30-second freshness limit and a
@@ -67,6 +74,32 @@ atomic transaction; the system reports failure rather than pretending otherwise.
 
 ## Storage, ACLs and Samba
 
+Administrator-only `storage.name` updates the `storage_names` settings value
+under the existing storage operation lock. Disk aliases bind to stable by-id
+IDs, volume overrides bind to filesystem UUIDs, and observed associations retain
+inherited names for known disconnected volumes. Mount records associations for
+new filesystems. State decoration operates on copies, preserves the underlying
+identifiers, and filters standard-user names by assigned storage/backup access.
+No schema migration or filesystem-label writes are needed.
+
+Empty-disk initialization has a separate administrator-only read preview and
+queued `storage.initialize` operation under the storage lock. It requires a
+stable device ID, kernel disk generation, live blank-signature probes, short-lived
+identity fingerprint, typed phrase and explicit acknowledgement. GPT creation with allowlisted ext4/Btrfs/NTFS formatters
+are allowed only for an unmounted physical disk without children, partition
+table, filesystem or active holders. The new random partition UUID, block
+identity and physical parent are checked before mkfs. Native sfdisk selects
+start/end alignment from device I/O topology and the usable GPT range; normal native in-use
+checks are retained. The selected formatter is required before any write;
+NTFS uses Microsoft basic data partitions and its generated volume serial. There is no forced erase, existing-data repartitioning or
+automatic rollback. A live-verified empty GPT may be recreated. The separate
+`storage.format_plan` / `storage.format_partition` completion path accepts only
+a single unformatted YANP data partition, with fresh partition/disk fingerprint,
+typed confirmation and repeated content/parent checks. It writes no partition
+table and uses the same storage lock and native formatter verification. Enclosing
+GPT entry details are excluded from blank probes; content/nested tables remain
+checked. See [STORAGE.md](STORAGE.md).
+
 `lsblk --json` is the live source of disk, partition, transport and UUID data.
 `findmnt` reconciles live mount points, access mode and FUSE sources, including
 NTFS mounts whose virtual device IDs differ from their backing partitions.
@@ -100,13 +133,23 @@ removing and recreating that share deliberately.
 
 ## Backups and events
 
-Backups copy with rsync into a new protected snapshot on a different physical disk.
-No `--delete` is used. Content lives under `snapshot/data`; a completion marker
-outside the copied tree is written **only** after exit zero. This prevents
-source files from forging successful snapshots. Partial snapshots remain
-inspectable; only completed snapshots count toward retention. rsync preserves
-ACLs/xattrs and skips unsafe links and other filesystems. There is no consistent
-filesystem snapshot of active source writers; quiesce applications as needed.
+Backup configuration offers dated hard-linked snapshots and a single rolling
+copy. Per-job mode and rolling keep/mirror policy live in the settings table and
+commit in the same transaction as the backup row. Old jobs default to dated
+hard-linked snapshots. Dated runs use checksum comparison and `--link-dest` to a
+pinned descriptor of the latest completed matching-source snapshot; their fresh
+targets never modify an earlier date. Rolling runs update `current/data` without
+hard-link bases; mirror policy uses `--delete-delay`, keep policy omits deletion.
+A mutable rolling tree is never used as a dated comparison base.
+
+Completion markers live outside copied data and are written only after exit
+zero. Partial, foreign and malformed snapshots are neither bases nor retention
+targets. Dated retention keeps the current successful run and unlinks older
+completed snapshots; it does not remove data still linked from retained dates.
+A rolling marker is removed before updates; failed/partial rolling copies remain
+browsable but are refused by whole-copy restore. Rsync preserves ACLs/xattrs,
+skips unsafe links and other filesystems, and does not provide consistent
+snapshots of active writers. See [BACKUPS.md](BACKUPS.md).
 
 Systemd timers submit jobs to the agent immediately. Restore always creates a
 new managed directory and copies the snapshot there, without overwriting a
@@ -138,3 +181,11 @@ even if the web app or agent stops. Both coordinate through a file lock. Agent
 restart immediately rolls back a pending change. Reboot restores only the last
 confirmed policy through its own unit, without altering external nftables files.
 Fail2ban's separate nftables tables continue to enforce bans independently.
+
+Backup disk usage measurements are administrator-only persisted jobs associated
+with a backup ID. Allowlisted paths are validated before audit/queueing and again
+at execution; the root and each component are pinned with O_NOFOLLOW. GNU du
+receives only the pinned FD traversal path, uses allocated bytes with no link
+following and stays on one filesystem. Storage locking prevents managed
+unmounts/backup writes during scanning. Nonzero exit status and malformed output
+fail the job; only a complete result is saved as a successful measurement.

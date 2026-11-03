@@ -10,6 +10,13 @@ from scripts.check_publication import inspect_files
 
 
 class PublicationTests(unittest.TestCase):
+    def test_unresolved_merge_markers_cannot_be_published(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);path=root/'README.md'
+            path.write_text('<'*7+' HEAD\nlocal\n'+'='*7+'\nremote\n'+'>'*7+' other\n')
+            findings=inspect_files([path],root,identities=[])
+            self.assertIn(('README.md','unresolved merge conflict'),findings)
+
     def test_source_credentials_and_local_identity_are_flagged_without_echoing_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

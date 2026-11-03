@@ -18,7 +18,7 @@ jobs:
       - name: Install native test dependencies
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-pymysql php-cli php-mysql apache2 libapache2-mod-php mariadb-server samba rsync acl ntfs-3g openssl fail2ban python3-systemd nodejs
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-pymysql php-cli php-mysql apache2 libapache2-mod-php mariadb-server samba rsync acl ntfs-3g btrfs-progs fdisk e2fsprogs openssl fail2ban python3-systemd nodejs
       - name: Static and safety checks
         run: |
           python3 -m unittest discover -s tests -p 'test_*.py' -v

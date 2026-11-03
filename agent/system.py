@@ -12,6 +12,33 @@ from .core import keys, require
 SERVICES = ("apache2", "mariadb", "smbd", "fail2ban", "yanp-agent", "yanp-firewall")
 
 
+def interface_link_rates(interfaces, root=Path('/sys/class/net')):
+    observed = []
+    for interface in interfaces:
+        item = dict(interface)
+        item.update(link_active=False,link_speed_mbps=None)
+        name = item.get('ifname')
+        # Addresses alone do not imply a physical link. Down interfaces and
+        # loopback must not display a stale or invented negotiated rate.
+        eligible = (isinstance(name,str) and name not in ('','.','..','lo') and '/' not in name and '\x00' not in name
+                    and item.get('link_type') != 'loopback' and 'UP' in item.get('flags',[])
+                    and str(item.get('operstate','')).upper() in ('UP','UNKNOWN'))
+        if eligible:
+            item['link_active'] = str(item.get('operstate','')).upper() == 'UP'
+            try:
+                item['link_active'] = (root/name/'carrier').read_text().strip() == '1'
+                if item['link_active']:
+                    speed = int((root/name/'speed').read_text().strip())
+                    if 0 < speed < 2**31:
+                        item['link_speed_mbps'] = speed
+            except (OSError,ValueError):
+                # Virtual devices and some drivers do not expose speed. One
+                # unsupported/disappearing interface must not hide system info.
+                pass
+        observed.append(item)
+    return observed
+
+
 class System:
     def __init__(self, config, db, runner):
         self.config, self.db, self.run = config, db, runner
@@ -29,7 +56,7 @@ class System:
                 "kernel": platform.release(), "cpu": cpu, "cpu_ticks": {"total": sum(ticks), "idle": ticks[3] + ticks[4]},
                 "memory": {"total": memory["MemTotal"], "available": memory["MemAvailable"]},
                 "uptime": float(Path("/proc/uptime").read_text().split()[0]), "load": os.getloadavg(),
-                "interfaces": json.loads(self.run.run(["ip", "-j", "address", "show"])),
+                "interfaces": interface_link_rates(json.loads(self.run.run(["ip", "-j", "address", "show"]))),
                 "services": services, "reboot_recommended": Path("/var/run/reboot-required").exists()}
 
     def updates(self, p):
