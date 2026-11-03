@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from agent.core import DB, Runner, require
+from agent.core import DB, Runner, atomic_write, require
 
 DIRECTORIES = ('agent', 'web', 'migrations', 'scripts', 'deploy', 'docs')
 FILES = ('README.md', 'LICENSE', 'VERSION')
@@ -63,8 +63,13 @@ def apply_read_grants(run, config):
             input="GRANT SELECT ON `yanp_nas`.`directory_access` TO 'yanp_web'@'localhost';\n")
 
 
-def deploy(source, installed, backup, db, run):
+def deploy(source, installed, backup, db, run, agent_unit=Path('/etc/systemd/system/yanp-agent.service')):
     refuse_application_mounts(installed, run)
+    template = source / 'deploy/yanp-agent.service'
+    require(template.is_file() and not template.is_symlink(), 'Missing or symlinked agent service template')
+    require(agent_unit.is_file() and not agent_unit.is_symlink(), 'Missing or symlinked installed agent service')
+    previous_unit = backup / 'yanp-agent.service'
+    shutil.copy2(agent_unit, previous_unit)
     copy_application(installed, backup / 'application')
     # Stop new web/timer submissions before checking jobs a second time. Never
     # interrupt an active backup, restore or other management operation.
@@ -73,6 +78,7 @@ def deploy(source, installed, backup, db, run):
     active_timers = [line.split()[0] for line in timers.splitlines() if line.strip()]
     stopped = []
     replaced = False
+    unit_replaced = False
     try:
         for service in [*active_timers, 'apache2']:
             run.run(['systemctl', 'stop', service], timeout=120)
@@ -83,6 +89,10 @@ def deploy(source, installed, backup, db, run):
         refuse_application_mounts(installed, run)
         replaced = True
         copy_application(source, installed)
+        if template.read_bytes() != agent_unit.read_bytes():
+            unit_replaced = True
+            atomic_write(agent_unit, template.read_text(), 0o644)
+            run.run(['systemctl', 'daemon-reload'], timeout=120)
         run.run(['systemctl', 'start', 'yanp-agent'], timeout=120)
         run.run(['systemctl', 'start', 'apache2'], timeout=120)
         run.run(['/usr/bin/python3', '-B', str(installed / 'scripts/healthcheck.py')], timeout=45)
@@ -91,6 +101,9 @@ def deploy(source, installed, backup, db, run):
             run.run(['systemctl', 'stop', 'apache2', 'yanp-agent'], timeout=120)
             refuse_application_mounts(installed, run)
             copy_application(backup / 'application', installed)
+        if unit_replaced:
+            atomic_write(agent_unit, previous_unit.read_text(), previous_unit.stat().st_mode & 0o777)
+            run.run(['systemctl', 'daemon-reload'], timeout=120)
         raise
     finally:
         # Restore services and only the timers that were active on entry.
@@ -110,7 +123,7 @@ def main():
     if not args.apply:
         print('Run on the NAS from the new release checkout:\n'
               '  sudo python3 -B scripts/update_storage.py --apply\n'
-              'Installs native filesystem/partition tools, backs up/replaces code, and restarts Apache/agent.\n'
+              'Installs native filesystem/partition tools, backs up/replaces code and the agent unit, and restarts Apache/agent.\n'
               'Preserves database, accounts, certificates, shares and disk files.\n'
               'Requires an idle YANP Nas 0.2.0 installation on Debian 13.\n'
               'The web interface is briefly unavailable during deployment.')

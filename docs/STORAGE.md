@@ -168,8 +168,10 @@ Without `--apply` it only prints the plan. This narrowly scoped updater requires
 Debian 13, YANP Nas 0.2.0 and schema version 1. It installs `ntfs-3g`, pauses web
 and backup-timer submissions, refuses queued/running jobs, backs up the previous
 code under `/var/backups/yanp-nas/storage-update-<timestamp>/application`, replaces
-application files and verifies startup. Failed deployment restores the prior
-code and restarts services. Installed packages are retained on rollback. No
+application files and verifies startup. It also backs up the installed agent
+service as `storage-update-<timestamp>/yanp-agent.service`, deploys the current
+service template and reloads systemd when changed. Failed deployment restores
+the prior code and service unit, reloads systemd and restarts services. Installed packages are retained on rollback. No
 database, configuration, certificates, share definitions or disk files are reset.
 The updater also applies the read-only `directory_access` metadata grant needed
 by live backup notification checks; code rollback retains this SELECT grant.

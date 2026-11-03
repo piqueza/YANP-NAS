@@ -94,6 +94,28 @@ the local console during that minute:
 sudo shutdown -c
 ```
 
+## APT fails with “seteuid … Operation not permitted”
+
+The root agent must switch to APT's restricted `_apt` download account. Some
+systemd sandbox launch paths remove CAP_SETUID from the effective/permitted set
+unless it is explicitly retained. The service template includes
+`AmbientCapabilities=CAP_SETUID` while keeping NoNewPrivileges and the other
+sandbox settings. APT's sandbox remains enabled; no root-download workaround
+is used. The source of this systemd launch behavior is visible in
+[systemd 257's execution code](https://github.com/systemd/systemd/blob/v257/src/core/exec-invoke.c#L4859).
+
+Copy the latest release and run `sudo python3 -B scripts/update_storage.py --apply`.
+The updater backs up the installed agent unit beside the application backup,
+installs the updated template and reloads systemd before starting the agent.
+On failed deployment it restores both code and unit and reloads systemd again.
+Existing local systemd drop-ins remain in place. After a successful update,
+select Check APT updates again; earlier failed jobs remain as history.
+
+The optional root-only native test `tests/test_apt_sandbox.py` runs APT's actual
+privilege-drop helper in a self-cleaning transient service using the template's
+sandbox policy. It checks the resulting `_apt` identity without installing
+packages, downloading indexes or modifying the installed agent service.
+
 ## Forgotten web password: root-console recovery
 
 Passwords are stored as Argon2id hashes in MariaDB, not in source files. They

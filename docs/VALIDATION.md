@@ -1,5 +1,19 @@
 # Validation and target-server acceptance
 
+## APT sandbox identity fix, 3 November 2026
+
+The build passes **195 local unit/native checks**; one additional native service
+check is skipped locally because the developer process is unprivileged. That
+check passes separately on the Debian 13 test NAS using only temporary files
+and a self-cleaning transient service. The original sandbox reproduces the
+permission failure; the updated template lets APT's real privilege-drop helper
+run as `_apt` with NoNewPrivileges and the other restrictions still enabled.
+No installed NAS service, package or application state is changed by these probes.
+Native systemd unit validation also passes. New updater tests cover deploying
+and backing up the unit, daemon-reload before restart, service/code rollback
+following a health-check failure, and symlink refusal before quiescence. A full
+APT refresh through the updated installed service remains a deployment check.
+
 ## Background disk usage, 3 November 2026
 
 The current build passes **193 unit/native tests** and **52 isolated integration

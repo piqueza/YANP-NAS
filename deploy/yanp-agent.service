@@ -16,6 +16,8 @@ RuntimeDirectory=yanp-nas
 RuntimeDirectoryMode=0750
 UMask=0077
 Environment=PYTHONDONTWRITEBYTECODE=1
+# Retain UID switching through systemd's sandbox setup for APT's _apt user.
+AmbientCapabilities=CAP_SETUID
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true

@@ -2,6 +2,10 @@
 
 ## 0.2.0 — 2026-10-31
 
+- Fix APT's failed `_apt` identity switch under the agent sandbox by explicitly
+  retaining CAP_SETUID. Feature updates now back up, deploy/reload and roll back
+  the installed agent service unit together with application code.
+
 - Add administrator-triggered background disk usage calculations for all backup
   copies, individual snapshots and subfolders. Native du measures allocated
   bytes, deduplicates hard links within the selection and saves results in Activity.
