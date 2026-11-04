@@ -91,7 +91,8 @@ table, filesystem or active holders. The new random partition UUID, block
 identity and physical parent are checked before mkfs. Native sfdisk selects
 start/end alignment from device I/O topology and the usable GPT range; normal native in-use
 checks are retained. The selected formatter is required before any write;
-NTFS uses Microsoft basic data partitions and its generated volume serial. There is no forced erase, existing-data repartitioning or
+NTFS uses Microsoft basic data partitions and its generated volume serial. The empty-disk path never performs forced erasure or existing-data repartitioning;
+a separate confirmed destructive operation is described below. There is no
 automatic rollback. A live-verified empty GPT may be recreated. The separate
 `storage.format_plan` / `storage.format_partition` completion path accepts only
 a single unformatted YANP data partition, with fresh partition/disk fingerprint,
@@ -189,3 +190,79 @@ receives only the pinned FD traversal path, uses allocated bytes with no link
 following and stays on one filesystem. Storage locking prevents managed
 unmounts/backup writes during scanning. Nonzero exit status and malformed output
 fail the job; only a complete result is saved as a successful measurement.
+
+Mounted-volume browsing is an administrator-only synchronous read operation,
+guarded independently by PHP and the agent. It resolves the approved UUID live
+and holds the storage lock for the listing. Read-only browsing bypasses only the
+root write-permission check, without changing ownership or modes. Paths are
+component arrays validated before access and opened with O_NOFOLLOW; Linux
+fdinfo mount IDs prevent traversing nested/bind mounts even on the same device.
+The endpoint returns at most 200 entry metadata records and opens no file bodies.
+
+Destructive storage actions have their own administrator-only previews and queued
+operations under the storage lock. A fingerprint covers disk generation/identity,
+all partition identities and the native table. Only explicitly acknowledged exact
+FORMAT/DELETE phrases are accepted within five minutes. Kernel partition numbers,
+ranges, parent devices and stable block identities are correlated before writes.
+Live mounts/swap/holders, mappings, active jobs and managed dependencies cause
+refusal. Deletion verifies remaining table entries; reinitialization explicitly
+removes old signatures then calls the existing guarded GPT/filesystem initializer.
+No successful state is reported after partial failure and there is no automatic
+retry, configuration deletion, rollback or secure-erasure claim.
+
+Inactive RAID reclamation is restricted to whole-disk formatting and an explicit
+allowlist of Intel ISW, Linux MD and DDF signatures. An additional boolean owner
+acknowledgement is required whenever those signatures are observed. Signature
+inventories are bound to the preview fingerprint. Kernel MD slave membership,
+block holders, mounts and swap are rechecked before writes; no array-detachment
+command is exposed. RAID signatures do not relax OS, configuration-reference or
+live table/kernel correlation checks. Post-wipe signature probes must be empty
+before targeted udev refresh and normal initialization. Partition deletion keeps
+the stricter non-RAID policy.
+
+### Disk clone jobs
+
+`storage.clone_plan` and `storage.clone` are administrator-only. The former is a
+read under the storage lock; the latter runs through the persistent worker and
+holds the same lock throughout. A single clone can be queued/running. Live maps
+and output update `jobs.result`; the ordinary `job.read`, final status/events and
+bounded command logs remain authoritative. Admin state includes a separate last
+100 clone job history/reservation list, independent of the last 50 mixed jobs.
+`agent/clones.py` validates both disk trees, references and confirmations, opens
+block devices with exclusive idle-device claims, and runs only fixed ddrescue
+argv with inherited descriptors. OS identification follows observed root, boot, usr and var mounts to physical
+ancestors; it blocks both OS sources and targets. Filesystem snapshots are not
+misrepresented as raw whole-disk block snapshots.
+Full on-target block-device and in-use/mount-race acceptance is still required on
+disposable hardware; native file tests cannot emulate kernel exclusive claims.
+
+### System-state migration
+
+`system.state_export` is administrator-only and runs under the storage lock.
+A consistent MariaDB snapshot exports fixed, allowlisted relational columns plus
+application settings and history. Hardware observations/network/firewall settings
+are excluded from the active restore and recorded in a manual-setup document.
+Samba passdb is copied under a read lock with tdbbackup, retaining account
+SIDs/password records, allocation counters and local SID;
+export/import inventories are checked. Secret-bearing binary/JSON contents never
+enter Runner logs, job results or web responses. The ZIP is agent-private mode
+0600 below a private state directory, outside the web and release trees.
+
+The package's installer invokes the installed root-console restorer. It checks
+manifest shape/version/schema, Samba blob checksum, fresh target state and exact
+pre-existing numeric Linux identities. It never provisions Linux users/groups or
+migrates passwd/shadow. Application rows are parameterized, historical pending
+jobs are made terminal, session versions change, and schedules/auto mounts remain
+inactive for disk review. Samba account state and generated share definitions are
+restored; new-host network/TLS/database/signing credentials stay in place. Apply
+requires exact RESTORE hostname confirmation, saves a private target-state backup,
+and keeps stopped services stopped on partial failure. There is no remote restore
+endpoint and no arbitrary SQL or archive extraction in the privileged agent.
+
+The Samba TDB snapshot path is resolved from the installed configuration, with
+private-file and parent-directory checks. Backup uses a unique adjacent snapshot
+name and removes it in a finally block. Restoration atomically replaces the fresh
+passdb only while Samba is stopped, retaining the previous passdb in the private
+pre-migration backup. The code never performs TDB-to-TDB pdbedit export/import:
+that backend has process-global state and can silently enumerate the wrong DB.
+Native tests exercise the actual helper functions against private Samba files.

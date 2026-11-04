@@ -18,13 +18,17 @@ import struct
 import threading
 import time
 
+from .migration import Migration
+from .clones import Clones, candidate_reason, system_disks
 from .backups import Backups, backup_options, browse_components
+from .browse import VolumeBrowser
 from .core import DB, Error, Locks, Runner, boolean, integer, json_default, keys, require, has_sensitive_fields
 from .devices import Devices
 from .fail2ban import Fail2ban
 from .firewall import Firewall
 from .monitor import Monitor, validate_monitoring
 from .initialize import Initializer
+from .erase import Eraser
 from .samba import Samba
 from .names import StorageNames
 from .notifications import Notifications, validate_ack_all
@@ -33,12 +37,12 @@ from .system import System
 
 
 OPERATIONS = {
-    "storage.name", "storage.mount", "storage.unmount", "storage.initialize", "storage.format_partition", "directory.create", "directory.rename", "directory.access", "directory.user_access",
+    "system.state_export", "storage.clone", "storage.disable_auto_mount", "storage.reinitialize", "storage.delete_partition", "storage.name", "storage.mount", "storage.unmount", "storage.initialize", "storage.format_partition", "directory.create", "directory.rename", "directory.access", "directory.user_access",
     "share.save", "share.remove", "backup.save", "backup.run", "backup.restore", "backup.measure", "smart.read",
     "system.updates", "system.install", "system.reboot", "system.shutdown", "firewall.change",
     "fail2ban.ban", "fail2ban.unban", "fail2ban.configure", "account.state", "system.service",
 }
-READS = {"state", "job.read", "backup.inspect", "system.warnings", "firewall.status", "fail2ban.status", "storage.initialize_plan", "storage.format_plan"}
+READS = {"storage.clone_plan","storage.signatures", "storage.reinitialize_plan", "storage.delete_partition_plan", "storage.browse", "state", "job.read", "backup.inspect", "system.warnings", "firewall.status", "fail2ban.status", "storage.initialize_plan", "storage.format_plan"}
 SYNC = {"account.sync", "firewall.confirm", "monitoring.save", "event.ack", "event.ack_all"}
 
 
@@ -83,6 +87,15 @@ class Agent:
     def request(self, op, actor, params, root=False):
         user = self.authorize(op, actor, params, root)
         runner = Runner()
+        if op == 'storage.clone_plan':
+            with self.locks.hold('storage'):
+                return Clones(self.config,Devices(self.config,runner),self.db,runner).plan(params)
+        if op == 'storage.signatures':
+            with self.locks.hold('storage'):
+                return Eraser(Devices(self.config,runner),self.db,runner).signature_report(params)
+        if op in ('storage.reinitialize_plan','storage.delete_partition_plan'):
+            with self.locks.hold('storage'):
+                return Eraser(Devices(self.config,runner),self.db,runner).plan(params,deleting=op=='storage.delete_partition_plan')
         if op in ('storage.initialize_plan','storage.format_plan'):
             with self.locks.hold('storage'):
                 initializer = Initializer(Devices(self.config, runner), runner)
@@ -105,6 +118,9 @@ class Agent:
                 row["log"] = "Detailed system command logs are visible to administrators."
             row.pop("params", None)
             return row
+        if op == 'storage.browse':
+            with self.locks.hold('storage'):
+                return VolumeBrowser(Devices(self.config, runner)).inspect(params)
         if op == "backup.inspect":
             with self.locks.hold("storage"):
                 return Backups(self.config, self.db, runner).inspect(params)
@@ -158,6 +174,9 @@ class Agent:
 
     def enqueue(self, op, actor, params):
         # All detailed validation repeats in the worker against current live Linux state.
+        if op == 'storage.clone':
+            require(not self.db.query("SELECT id FROM jobs WHERE operation='storage.clone' AND status IN ('queued','running') LIMIT 1"),
+                    'A disk clone is already queued or running')
         ident = secrets.token_hex(16)
         backup_id = integer(params.get("id")) if op in ("backup.run", "backup.restore", "backup.measure") else None
         if backup_id:
@@ -175,6 +194,16 @@ class Agent:
         names = StorageNames(self.db)
         if admin:
             devices, volumes = names.decorate(self.db.setting('observed_devices'),self.db.query('SELECT * FROM volumes'))
+            clone_jobs=self.db.query("SELECT id,operation,status,params,result,error,started_at,ended_at,created_at FROM jobs WHERE operation='storage.clone' ORDER BY created_at DESC LIMIT 100")
+            for clone in clone_jobs:
+                clone['params']=json.loads(clone['params']) if isinstance(clone['params'],str) else clone['params']
+                clone['result']=json.loads(clone['result']) if isinstance(clone['result'],str) else clone['result']
+            nodes=(devices or {}).get('devices',[])
+            for disk in nodes:
+                if disk.get('type')=='disk':
+                    disk['clone_source_reason']=candidate_reason(disk,nodes)
+                    disk['clone_destination_reason']=candidate_reason(disk,nodes,True)
+                    disk['system_disk']=disk['path'] in system_disks(nodes)
             directories = self.db.query("SELECT * FROM directories ORDER BY name")
             shares = self.db.query("SELECT * FROM shares ORDER BY name")
             backups = self.db.query("SELECT * FROM backups ORDER BY name")
@@ -182,7 +211,7 @@ class Agent:
             jobs = self.db.query("SELECT id,actor_id,operation,status,error,backup_id,started_at,ended_at,created_at FROM jobs ORDER BY created_at DESC LIMIT 50")
             events = self.db.query('SELECT * FROM events ORDER BY id DESC LIMIT 100')
             notification_summary = Notifications(self.db).summary(max((e['id'] for e in events),default=0))
-            return {"devices": devices, "system": self.db.setting("observed_system"),
+            return {"clone_jobs":clone_jobs,"devices": devices, "system": self.db.setting("observed_system"),
                 "smart": self.db.setting("observed_smart"), "security": self.db.setting("observed_security"),
                 "share_status": self.db.setting("observed_shares"), "timers": self.db.setting("observed_timers"),
                 "directories": directories, "access": self.db.query("SELECT * FROM directory_access"),
@@ -213,8 +242,13 @@ class Agent:
         system = System(self.config, self.db, runner)
         f2b = Fail2ban(self.config, self.db, runner)
         mapping = {
+            "system.state_export": lambda x: Migration(self.config,self.db,runner).export(x),
+            "storage.clone": lambda x: Clones(self.config,storage.devices,self.db,runner).execute(x),
+            "storage.reinitialize": lambda x: Eraser(storage.devices,self.db,runner).execute(x),
+            "storage.delete_partition": lambda x: Eraser(storage.devices,self.db,runner).execute(x,deleting=True),
             "storage.name": lambda x: StorageNames(self.db).save(x, storage.devices),
             "storage.mount": storage.mount, "storage.unmount": storage.unmount,
+            "storage.disable_auto_mount": storage.disable_auto_mount,
             "storage.initialize": Initializer(storage.devices, runner).initialize,
             "storage.format_partition": Initializer(storage.devices, runner).format_partition,
             "directory.create": storage.create, "directory.rename": storage.rename, "directory.access": storage.access,
@@ -242,7 +276,7 @@ class Agent:
                 self.authorize(row["operation"], row["actor_id"] or 0, p, root=row["actor_id"] is None)
                 self.db.execute("UPDATE jobs SET status='running',started_at=UTC_TIMESTAMP() WHERE id=%s", (ident,))
                 self.db.event("job.running", f"{row['operation']} running", actor=row["actor_id"])
-                lock = "storage" if row["operation"].split(".")[0] in ("storage", "directory", "share", "backup", "smart", "account") else "system"
+                lock = "storage" if row["operation"] == "system.state_export" or row["operation"].split(".")[0] in ("storage", "directory", "share", "backup", "smart", "account") else "system"
                 # Monitor may be collecting SMART; queued commands retry the lock immediately.
                 deadline = time.monotonic() + 120
                 while True:

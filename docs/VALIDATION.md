@@ -1,5 +1,142 @@
 # Validation and target-server acceptance
 
+## Samba TDB migration correction, 4 November 2026
+
+The corrected build passes **274 local checks** (275 run; the root/systemd APT
+check skipped) and **59 isolated integration checks**. A real Samba 4.22 fixture
+reproduced an empty same-backend pdbedit export without changing source accounts.
+The replacement exercises the actual locked-read-backup and atomic-replacement
+helpers against separate temporary databases: credential hashes, account flags,
+user and primary-group SIDs survive, source contents remain unchanged and
+temporary snapshots are removed. It runs without root and starts no Samba
+service. Additional regressions cover default/custom backend paths, unsupported
+backends, private-file permissions, cleanup on failed probes and retention of
+the inventory completeness guard. The installer/updater explicitly install
+`tdb-tools`. NAS data, accounts and services were not accessed.
+
+The earlier attribution of this empty export to unavailable root privileges was
+incorrect. Same-backend process-global TDB state was the issue; the native
+non-root fixture now demonstrates the corrected data flow. A real SMB client
+login on a migrated host remains a hardware acceptance check.
+
+
+## System-state migration and OS clone correction, 4 November 2026
+
+The build has **270 passing local unit/native checks**, with two privileged
+checks skipped (systemd/APT and full native Samba passdb acceptance), and **59
+isolated integration checks**. Tests reject both ext4 and Btrfs live OS raw clone
+previews/execution, including stale clients with the previous live-copy
+acknowledgement. Migration checks cover private ZIP contents/modes, account and
+credential metadata, strict settings/manifest validation, pre-existing UID/GID
+requirements and conflicts, no account creation, no credential contents in
+results/logs, preserved sync/password state, session invalidation and disabled
+pending work/storage schedules. Real MariaDB roundtrips preserve user hashes,
+permissions, history and deleted-ID counters using a second disposable database.
+Browser QA uses synthetic state, confirms the always-available migration action
+and rejects missing sensitive-data acknowledgement. No NAS disks, installed
+services, real Samba database or Linux account files were changed.
+
+The separate root-only native Samba check uses private temporary backends and
+compares credential hashes, flags and account/group SIDs after export/import. It
+could not run here: root privileges are unavailable. Consequently end-to-end
+Samba authentication on the new host is still an acceptance requirement; mocked
+Samba flows and database tests are not a substitute.
+
+
+## Whole-disk clone draft, 4 November 2026
+
+The build passes **260 local unit/native checks** (one root/systemd check skipped)
+and **57 isolated integration checks**.
+
+New checks cover USB/raw/RAID eligibility, OS source-only and live acknowledgement,
+mount/holder/readonly/swap/MD protections, target references, pair identity/size/
+sector mismatches, exact confirmations/expiry/layout changes, admin-only access
+and single-clone queueing. Native ddrescue copies in both modes compare temporary
+file hashes and preserve source bytes. Simulated read errors retain unreadable
+bytes and incomplete progress even on zero exit. Execution checks keep incomplete
+copies failed and publish terminal reports. UI checks cover boolean payloads,
+acknowledgement/no double submit, paired progress, escaped errors, history and
+suppression of Storage partition actions. Browser QA uses synthetic disks with
+writes disabled; no NAS disk was read or changed. Disposable physical-disk tests
+remain necessary for kernel O_EXCL, real disconnect/read failures, USB bridges,
+live OS consistency and partition reread behavior.
+
+
+## Overlapping DOS/Atari signatures, 4 November 2026
+
+Four new regression checks cover a native sparse image with DOS, Intel ISW and
+Atari metadata at `0x1d2`, verified whole-disk reclamation, nested/standalone
+signature refusal and unchanged RAID acknowledgement requirements. The local
+suite has 246 checks (one root/systemd check skipped); after updating the UI label
+expectation, the dialog checks pass. The native image test inspects real probe
+results; full erasure uses mocked block-device state. No physical disk is changed.
+
+## Retired RAID-member reclamation, 4 November 2026
+
+The build passes **241 local unit/native checks** and **56 isolated integration
+checks**, with the root/systemd APT test skipped locally. Native disposable images
+reproduce DOS plus NTFS and Intel ISW metadata, verify detection and remove the
+Intel signature without touching the NTFS header or invoking an array operation.
+This exercises metadata-erasure components; complete block-device reclamation
+remains a disposable-hardware acceptance task. Backend tests cover additional
+acknowledgement, active MD/DM and mount protection, array assembly before writes,
+changed signature inventories, residual signatures, shared idle member UUIDs,
+masked udev table identity and expected-versus-I/O-error no-table reports. UI
+checks cover the extra acknowledgement and boolean payload. Browser tests use
+synthetic RAID devices with disk writes disabled. No NAS disk is changed.
+
+## Signature inspection and GPT recognition, 4 November 2026
+
+The build passes **231 local unit/native checks** and **56 isolated integration
+checks**, with the root/systemd APT test skipped locally. New native regular-file
+images reproduce wipefs PMBR capitalization for GPT layouts with 512-byte/4K
+sector settings. Backend checks exercise recognition through the real erasure
+context, confirm read-only signature reporting and retain refusal of RAID/unknown
+or malformed metadata. UI checks verify escaped types, recognized PMBR display
+and guarded erase links only for eligible metadata. API checks verify admin-only
+access and refusal of missing disks. Browser QA uses synthetic signatures with
+disk writes disabled; no NAS or physical-disk state is changed.
+
+## Automatic-mount controls, 4 November 2026
+
+The build passes **227 local unit/native checks** and **55 isolated integration
+checks**, with the existing root/systemd APT probe skipped locally. New checks
+cover saved/offline preferences, canonical stored UUIDs, verified app-owned unit
+identity, refusal of external/symlinked/overridden units, stale missing units,
+disable failure, still-enabled state, administrator gates and UUID-only payloads.
+Checks also verify that no mount/unmount/erase command or --now option is issued,
+unit contents remain untouched, and erase errors identify the actual dependency.
+Browser QA uses an in-memory preference fixture; no installed NAS unit or mount
+is changed. Live startup-policy changes remain a deployment acceptance check.
+
+## Destructive storage actions, 4 November 2026
+
+The build passes **220 local unit/native checks** and **54 isolated integration
+checks**, with the root/systemd APT probe skipped in the local environment. New
+checks cover exact phrases/expiry, acknowledgement, generation/layout changes,
+mount/swap/holder/mapping/OS protections, managed dependencies, duplicate UUIDs,
+unsupported signatures, final live checks and partial-failure reporting. Native
+sfdisk tests delete one GPT/DOS entry on disposable 512-byte/4K-sector regular-file
+images and verify preservation of the other entry and its data. Native wipefs
+checks use a new disposable filesystem image without force. UI tests verify
+operation payloads and OK-only/no-resubmit results for success and failure.
+Browser testing uses synthetic devices with disk writes disabled. No physical
+NAS disk, partition or filesystem is changed during automated or browser tests.
+Live hardware erasure, kernel rereads and udev timing remain acceptance checks on
+a disposable disk chosen and confirmed by its owner.
+
+## Mounted-volume browser, 4 November 2026
+
+The build passes **204 local unit/native checks** and **53 isolated integration
+checks**. One root/systemd-only APT test remains skipped in the unprivileged local
+suite. New disposable-directory checks cover read-only metadata, imported root
+permissions, UTF-8/escaped names, pagination, symlink/FIFO handling, traversal,
+same-device mount-ID boundaries, unavailable volumes, administrator authorization
+and storage locking. UI checks verify escaped names, component paths and paging.
+Browser QA uses only synthetic mounted-volume metadata and temporary files, with
+no connection to or changes on the NAS. Real hot-unplug and filesystem-specific
+read errors remain target-server acceptance checks.
+
 ## APT sandbox identity fix, 3 November 2026
 
 The build passes **195 local unit/native checks**; one additional native service
@@ -276,8 +413,10 @@ publication.
 ## Deliberate Phase 1 boundaries
 
 - Existing ext4/XFS/Btrfs/NTFS on physical disks/partitions, plus explicitly
-  confirmed GPT/ext4/Btrfs/NTFS initialization of empty whole disks. No existing-data
-  repartitioning, RAID/encryption management, FAT/exFAT mounts or OS storage edits.
+  confirmed GPT/ext4/Btrfs/NTFS initialization of empty disks, plus separately
+  confirmed destructive whole-disk reinitialization and individual GPT/DOS primary
+  partition deletion. No data-preserving resize/repartitioning, RAID/encryption
+  management, FAT/exFAT mounts or OS storage edits.
 - Directory grants apply to managed directory/default ACLs; existing descendant
   ACLs are preserved. Arbitrary existing trees cannot be imported in the UI.
 - Backups use dated hard-linked snapshots with completion-based retention or a

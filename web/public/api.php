@@ -70,7 +70,7 @@ if ($route === 'me') {
     try { $u = current_user(false, false); } catch (HttpError $e) { if ($e->status !== 401) throw $e; $u = null; }
     result(['user' => $u, 'csrf' => $_SESSION['csrf']]);
 }
-$passiveAction = $route === 'action' && in_array($p['operation'] ?? '', ['state','job.read','backup.inspect','system.warnings','firewall.status','fail2ban.status'], true);
+$passiveAction = $route === 'action' && in_array($p['operation'] ?? '', ['state','job.read','backup.inspect','storage.signatures','storage.browse','system.warnings','firewall.status','fail2ban.status'], true);
 $u = current_user(false, $method === 'POST' && !$passiveAction);
 if ($route === 'activity') {
     fields($p, []);

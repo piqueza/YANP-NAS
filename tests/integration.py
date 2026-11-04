@@ -273,7 +273,41 @@ def main():
         admin.call('action',{'operation':'storage.initialize_plan','params':{'stable_id':'not-a-device'}},expect=422)
         admin.call('action',{'operation':'storage.format_plan','params':{'stable_id':'not-a-device','partition_uuid':'11111111-2222-3333-4444-555555555555'}},expect=422)
         passed('disk initialization/format previews and writes are administrator-only and missing disks are refused')
+        for operation in ('storage.reinitialize_plan','storage.delete_partition_plan','storage.reinitialize','storage.delete_partition'):
+            user.call('action',{'operation':operation,'params':{}},expect=403)
+        admin.call('action',{'operation':'storage.reinitialize_plan','params':{'stable_id':'not-a-device'}},expect=422)
+        admin.call('action',{'operation':'storage.delete_partition_plan','params':{'stable_id':'not-a-device','partition':'/dev/not-a-partition'}},expect=422)
+        passed('destructive storage previews and execution are admin-only and missing devices cannot be selected')
+        user.call('action',{'operation':'storage.signatures','params':{'stable_id':'not-a-device'}},expect=403)
+        admin.call('action',{'operation':'storage.signatures','params':{'stable_id':'not-a-device'}},expect=422)
+        passed('signature inspection is administrator-only and rejects unknown disks without changing storage')
+        for operation in ('storage.clone_plan','storage.clone'):
+            user.call('action',{'operation':operation,'params':{}},expect=403)
+        admin.call('action',{'operation':'storage.clone_plan','params':{'source':'not-a-device','destination':'not-a-device','rescue':False}},expect=422)
+        clone_job=admin.call('action',{'operation':'storage.clone','params':{}})['job_id']
+        wait_until(lambda:admin.call('action',{'operation':'job.read','params':{'id':clone_job}})['status']=='failed')
+        clone_state=admin.call('state')
+        assert any(j['id']==clone_job and j['status']=='failed' for j in clone_state['clone_jobs'])
+        assert 'clone_jobs' not in user.call('state')
+        passed('disk cloning is administrator-only; invalid requests fail before disk access and reports stay private')
+        user.call('action',{'operation':'system.state_export','params':{'acknowledge_sensitive':True}},expect=403)
+        state_job=admin.call('action',{'operation':'system.state_export','params':{'acknowledge_sensitive':False}})['job_id']
+        wait_until(lambda:admin.call('action',{'operation':'job.read','params':{'id':state_job}})['status']=='failed')
+        passed('system-state export requires administrator authorization and explicit sensitive-data acknowledgement')
+
+
         user.call('action',{'operation':'backup.inspect','params':{'id':1}},expect=422);passed('unassigned backup cannot be inspected')
+        user.call('action',{'operation':'storage.browse','params':{'uuid':'TEST-UUID'}},expect=403)
+        admin.call('action',{'operation':'storage.browse','params':{'uuid':'TEST-UUID','path':['..']}},expect=422)
+        admin.call('action',{'operation':'storage.browse','params':{'uuid':'NOT-A-MOUNTED-VOLUME'}},expect=422)
+        passed('volume browsing is administrator-only and rejects traversal or unavailable volumes')
+        user.call('action',{'operation':'storage.disable_auto_mount','params':{'uuid':'NOT-APPROVED'}},expect=403)
+        preference_job=admin.call('action',{'operation':'storage.disable_auto_mount','params':{'uuid':'NOT-APPROVED'}})['job_id']
+        def preference_failed():
+            return admin.call('action',{'operation':'job.read','params':{'id':preference_job}})['status']=='failed'
+        wait_until(preference_failed)
+        assert 'no saved YANP Nas mount preference' in admin.call('action',{'operation':'job.read','params':{'id':preference_job}})['error']
+        passed('automatic mount removal is administrator-only and unknown preferences fail before any service changes')
         admin.call('action',{'operation':'exec','params':{'command':'id'}},expect=422);passed('arbitrary commands rejected by agent')
         user.call('action',{'operation':'backup.measure','params':{'id':assigned_backup}},expect=403)
         admin.call('action',{'operation':'backup.measure','params':{'id':assigned_backup,'snapshot':'current','path':'../outside'}},expect=422)
@@ -416,6 +450,37 @@ def main():
         assert not recovery_db.query('SELECT enabled FROM users WHERE id=%s',(uid,))[0]['enabled']
         fresh.call('login',{'username':'yanp_alice','password':disabled_password},expect=401)
         passed('console recovery does not enable a disabled account')
+        # Round-trip real relational state in a second disposable database.
+        # Linux identity lookups are fixture-only; no OS accounts or Samba are changed.
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from agent.migration import snapshot, COLUMNS
+        from scripts.restore_system_state import import_rows
+        people={u['username']:u['id'] for u in recovery_db.query('SELECT id,username FROM users')}
+        def fake_user(name):
+            return SimpleNamespace(pw_gecos='YANP Nas',pw_uid=2000+people[name],pw_gid=2000+people[name])
+        def fake_group(gid):
+            return SimpleNamespace(gr_name=next(name for name,ident in people.items() if 2000+ident==gid))
+        with patch('agent.migration.pwd.getpwnam',side_effect=fake_user),patch('agent.migration.grp.getgrgid',side_effect=fake_group):
+            portable=snapshot(recovery_db)
+        with connect() as c,c.cursor() as cur:
+            cur.execute('CREATE DATABASE migration_target CHARACTER SET utf8mb4')
+            cur.execute('USE migration_target')
+            for statement in (ROOT/'migrations/001_initial.sql').read_text().split(';'):
+                if statement.strip():cur.execute(statement)
+        target_db=DB({**config,'db_user':'root','db_password':'','db_name':'migration_target'})
+        portable['auto_increment']['backups']=max(portable['auto_increment'].get('backups',1),100)
+        import_rows(target_db,portable)
+        assert target_db.query("SELECT AUTO_INCREMENT AS n FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='backups'")[0]['n']>=100
+        assert target_db.query('SELECT id,username,password_hash FROM users ORDER BY id')==recovery_db.query('SELECT id,username,password_hash FROM users ORDER BY id')
+        assert target_db.query('SELECT * FROM directory_access ORDER BY directory_id,user_id')==recovery_db.query('SELECT * FROM directory_access ORDER BY directory_id,user_id')
+        assert not target_db.query("SELECT id FROM jobs WHERE status IN ('queued','running')")
+        assert not target_db.query('SELECT id FROM backups WHERE enabled=1')
+        assert not target_db.query('SELECT uuid FROM volumes WHERE persistent=1')
+        for table in COLUMNS:
+            assert target_db.query('SELECT COUNT(*) AS n FROM '+table)[0]['n']==len(portable['tables'][table])
+        passed('system-state database roundtrip preserves users, hashes, permissions and history without replaying jobs or activating storage')
+
         print(f'{tests} integration checks passed. Isolated URL: {base}',flush=True)
         if args.keep:
             (folder/'browser-qa.json').write_text(json.dumps({'url':base,'username':'yanp_admin','password':password}))

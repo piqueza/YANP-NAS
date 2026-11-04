@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0-only
 import contextlib
+import configparser
 import json
 import os
 from pathlib import Path
 import secrets
 import stat
 
-from .core import Error, atomic_write, boolean, integer, keys, label, require, username
+from .core import Error, atomic_write, boolean, integer, keys, label, require, username, uuid_value
 from .devices import Devices, open_directory
 from .names import StorageNames
 from .filesystems import is_ntfs, mount_options, prepare_ntfs
@@ -105,6 +106,43 @@ class Storage:
                     os.rmdir(probe, dir_fd=root)
             finally:
                 os.close(root)
+
+    def disable_auto_mount(self, p, unit_root=Path('/etc/systemd/system')):
+        keys(p, ('uuid',))
+        uuid_value(p['uuid'])
+        rows = self.db.query('SELECT uuid,persistent FROM volumes WHERE uuid=%s', (p['uuid'],))
+        require(bool(rows), 'This filesystem has no saved YANP Nas mount preference')
+        saved_uuid = uuid_value(rows[0]['uuid'])
+        target = self.devices.root / saved_uuid
+        unit = self.run.run(['systemd-escape','--path','--suffix=mount',str(target)]).strip()
+        require(unit.endswith('.mount') and '/' not in unit and '\n' not in unit, 'Invalid mount unit')
+        path = unit_root / unit
+        require(not path.is_symlink(), 'The mount unit is symlinked; manage it locally')
+        report = self.run.run(['systemctl','show',unit,'--property=FragmentPath,DropInPaths,What,Where','--no-pager'],allowed=(0,1,3,4))
+        properties = dict(line.split('=',1) for line in report.splitlines() if '=' in line)
+        if path.exists():
+            require(path.is_file() and path.read_text().startswith('# YANP Nas\n'), 'Mount unit is externally managed')
+            config = configparser.ConfigParser(interpolation=None)
+            config.read_string(path.read_text())
+            expected = '/dev/disk/by-uuid/' + saved_uuid
+            require(config.get('Mount','What',fallback='') == expected
+                    and config.get('Mount','Where',fallback='') == str(target)
+                    and properties.get('FragmentPath') == str(path)
+                    and not properties.get('DropInPaths')
+                    and (properties.get('What') == expected or os.path.realpath(properties.get('What','')) == os.path.realpath(expected))
+                    and properties.get('Where') == str(target),
+                    'Mount unit has external or mismatched configuration; manage it locally')
+            # Deliberately omit --now: changing a boot preference never unmounts
+            # an in-use filesystem or interrupts its clients.
+            self.run.run(['systemctl','disable',unit])
+            status = self.run.run(['systemctl','is-enabled',unit],allowed=(0,1,3,4)).strip()
+            require(status in ('disabled','static','not-found'), 'Automatic mount is still enabled; inspect the mount unit locally')
+        else:
+            require('FragmentPath' in properties and not properties['FragmentPath'] and not properties.get('DropInPaths'),
+                    'Another mount unit is loaded for this path; manage it locally')
+        self.db.execute('UPDATE volumes SET persistent=0 WHERE uuid=%s', (saved_uuid,))
+        return {'state':'Automatic mount disabled','uuid':saved_uuid,
+                'note':'If the volume is mounted, unmount it separately before erasing.'}
 
     def unmount(self, p):
         keys(p, ("uuid",))

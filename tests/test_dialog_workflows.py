@@ -19,6 +19,101 @@ const run=code=>vm.runInContext(code,context);
         result=subprocess.run(['node','-e',harness+code],cwd=Path(__file__).resolve().parents[1],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
 
+    def test_system_state_export_available_without_clonable_os_and_requires_sensitive_ack(self):
+        self.js(r'''
+context.FormData=class {constructor(form){return Object.entries(form.values);}};
+run(`user={role:'admin'};state={devices:{devices:[]},jobs:[]};let calls=[];action=async(op,p)=>{calls.push({op,p});return {job_id:'test-job'};};closeDialog=()=>{};`);
+assert.match(run('advancedDisksPage()'),/Generate system-state installer/);
+assert.match(run('advancedDisksPage()'),/Live OS disk cloning is disabled/);
+context.form={dataset:{form:'state-export'},values:{},elements:{acknowledge_sensitive:{checked:false}}};
+(async()=>{
+ await assert.rejects(run('submit(form)'),/sensitive credentials/);assert.equal(run('calls.length'),0);
+ context.form.elements.acknowledge_sensitive.checked=true;await run('submit(form)');
+ assert.equal(run('calls[0].op'),'system.state_export');assert.equal(run('calls[0].p.acknowledge_sensitive'),true);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+''')
+
+    def test_clone_submit_requires_ack_and_queues_fixed_boolean_payload_only_once(self):
+        self.js(r'''
+context.FormData=class {constructor(form){return Object.entries(form.values);}};
+run(`let calls=[];api=async(route,p)=>{calls.push(p);return {job_id:'test-job'};};closeDialog=()=>{};refresh=async()=>{};`);
+context.form={dataset:{form:'clone-start'},values:{source:'test-source',destination:'test-target',rescue:'1',fingerprint:'test-fp',observed_at:'123',confirmation:'CLONE /dev/sdy'},elements:{acknowledge_erase:{checked:false},acknowledge_live:{checked:false}}};
+(async()=>{
+ await assert.rejects(run('submit(form)'),/Acknowledge/);assert.equal(run('calls.length'),0);
+ context.form.elements.acknowledge_erase.checked=true;
+ await run('submit(form)');await run('submit(form)');assert.equal(run('calls.length'),1);
+ const p=run('calls[0]');assert.equal(p.operation,'storage.clone');assert.equal(p.params.rescue,true);
+ assert.equal(p.params.acknowledge_erase,true);assert.equal(p.params.acknowledge_live,false);
+ assert.equal(p.params.observed_at,123);assert.equal(p.params.destination,'test-target');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+''')
+
+    def test_clone_page_pairs_disks_and_storage_hides_partition_actions_during_clone(self):
+        self.js(r'''
+run(`user={role:'admin'};state={devices:{devices:[
+ {type:'disk',path:'/dev/sdz',stable_id:'test-source',model:'Source disk',size:1024,serial:'TESTONLY'},
+ {type:'part',path:'/dev/sdz1',physical_disks:['/dev/sdz'],fstype:'ntfs',can_mount:true,uuid:'TEST-UUID'},
+ {type:'disk',path:'/dev/sdy',stable_id:'test-target',model:'Target disk',size:1024,serial:'TESTONLY'}]},directories:[],volumes:[],clone_jobs:[{id:'test-job',status:'running',params:{source:'test-source',destination:'test-target',rescue:true},result:{percent:50,total_bytes:1024,rescued_bytes:512,bad_bytes:16,output_tail:'read error <unsafe>'}}]};`);
+const advanced=run('advancedDisksPage()');
+assert.match(advanced,/Disk Clone In Action/);assert.match(advanced,/Source disk/);assert.match(advanced,/Target disk/);
+assert.match(advanced,/<progress[^>]+value="50"/);assert.match(advanced,/read error &lt;unsafe&gt;/);
+assert.match(advanced,/Rescue clone/);assert.ok(!advanced.includes('data-action="clone-new"'));
+const storage=run('storagePage()');
+assert.equal((storage.match(/Part of ongoing cloning action/g)||[]).length,2);
+assert.match(storage,/Device identifiers &amp; SMART details/);assert.ok(!storage.includes('data-action="mount"'));
+assert.ok(!storage.includes('data-action="disk-reinitialize"'));
+run("state.clone_jobs[0].status='failed';state.clone_jobs[0].error='unreadable source';");
+assert.match(run('advancedDisksPage()'),/unreadable source/);assert.match(run('cloneHistory()'),/View full report and command log/);
+''')
+
+    def test_destructive_disk_results_are_terminal_and_submit_exact_action_payloads(self):
+        self.js(r'''
+context.FormData=class {constructor(form){return Object.entries(form.values);}};
+run(`let calls=[],fail=false;const actions={innerHTML:''},controls=[{disabled:false}];
+completedAction=async(op,params)=>{calls.push({op,params});if(fail)throw Error('partial failure');};
+progress=()=>{};refresh=async()=>{};toast=()=>{};`);
+(async()=>{
+ for(const kind of ['delete','reinitialize'])for(const failed of [false,true]) {
+  run('fail='+failed);
+  context.form={dataset:{form:'destructive-storage'},values:{kind,stable_id:'test-disk',partition:'/dev/sdz1',filesystem:'btrfs',fingerprint:'test-fp',observed_at:'123',confirmation:kind==='delete'?'DELETE /dev/sdz1':'FORMAT /dev/sdz'},elements:{acknowledge_erase:{checked:true}},querySelectorAll:()=>run('controls'),querySelector:()=>run('actions')};
+  if(failed)await assert.rejects(run('submit(form)'),/partial failure/);else await run('submit(form)');
+  assert.equal(context.form.dataset.initializationFinished,'true');assert.match(run('actions.innerHTML'),/>OK<\/button>/);
+  assert.ok(!run('actions.innerHTML').includes('Cancel'));
+  const call=run('calls.at(-1)');assert.equal(call.op,kind==='delete'?'storage.delete_partition':'storage.reinitialize');
+  assert.equal(call.params.acknowledge_erase,true);assert.equal(call.params.observed_at,123);
+  assert.equal('partition' in call.params,kind==='delete');assert.equal('filesystem' in call.params,kind!=='delete');
+  const count=run('calls.length');await run('submit(form)');assert.equal(run('calls.length'),count);
+ }
+})().catch(e=>{console.error(e);process.exitCode=1;});
+''')
+
+    def test_signature_inspection_shows_native_pmbr_and_keeps_unknown_types_blocked(self):
+        self.js(r'''
+run(`let html='',allow=true;dialog=(title,body)=>{html=body;};
+api=async()=>({device:{model:'Test disk',path:'/dev/sdz',stable_id:'test-disk',serial:'TESTONLY'},signatures:[{path:'/dev/sdz',type:allow?'PMBR':'<unknown>',offset:'0x1fe',supported:allow}],can_reinitialize:allow,block_reason:allow?'':'Unsupported metadata requires local handling'});`);
+(async()=>{
+ await run("clickAction({dataset:{action:'disk-signatures',id:'test-disk'}})");
+ assert.match(run('html'),/PMBR/);assert.match(run('html'),/Recognized/);assert.match(run('html'),/Review whole-disk erase/);
+ run('allow=false');await run("clickAction({dataset:{action:'disk-signatures',id:'test-disk'}})");
+ assert.match(run('html'),/&lt;unknown&gt;/);assert.match(run('html'),/Unsupported metadata/);
+ assert.ok(!run('html').includes('data-action="disk-reinitialize"'));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+''')
+
+    def test_raid_reclaim_requires_additional_acknowledgement_and_sends_boolean(self):
+        self.js(r'''
+context.FormData=class {constructor(form){return Object.entries(form.values);}};
+run(`let calls=[];const actions={innerHTML:''};completedAction=async(op,args)=>{calls.push(args);};progress=()=>{};refresh=async()=>{};toast=()=>{};`);
+context.form={dataset:{form:'destructive-storage'},values:{kind:'reinitialize',raid_required:'1',stable_id:'test-disk',filesystem:'btrfs',fingerprint:'fp',observed_at:'123',confirmation:'FORMAT /dev/sdz'},elements:{acknowledge_erase:{checked:true},acknowledge_raid:{checked:false}},querySelectorAll:()=>[],querySelector:()=>run('actions')};
+(async()=>{
+ await assert.rejects(run('submit(form)'),/no longer needed/);assert.equal(run('calls.length'),0);
+ assert.equal(context.form.dataset.initializationAttempted,undefined);
+ context.form.elements.acknowledge_raid.checked=true;await run('submit(form)');
+ assert.equal(run('calls[0].acknowledge_raid'),true);assert.equal(run('calls[0].filesystem'),'btrfs');
+ assert.equal(context.form.dataset.initializationFinished,'true');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+''')
+
     def test_cancel_and_helper_buttons_cannot_be_implicit_submit_buttons(self):
         self.js(r'''
 let html='';context.document.querySelector=s=>s==='#dialog-content'?{set innerHTML(value){html=value;}}:s==='#dialog'?{showModal:()=>{}}:undefined;

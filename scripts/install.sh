@@ -39,7 +39,7 @@ fi
 [[ ! -e /etc/yanp-nas && ! -e /opt/yanp-nas && ! -e /etc/nas-manager/web.json ]] || { echo 'Existing installation or destination occupied. For a fresh test reinstall use --reinstall --apply.' >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y apache2 libapache2-mod-php php-cli php-mysql mariadb-server python3 python3-pymysql python3-apt python3-systemd samba smbclient nftables fail2ban smartmontools rsync acl ntfs-3g btrfs-progs openssl util-linux fdisk e2fsprogs udev iproute2
+apt-get install -y apache2 libapache2-mod-php php-cli php-mysql mariadb-server python3 python3-pymysql python3-apt python3-systemd samba smbclient nftables fail2ban smartmontools rsync tdb-tools gddrescue acl ntfs-3g btrfs-progs openssl util-linux fdisk e2fsprogs udev iproute2
 getent group yanp-web >/dev/null || groupadd --system yanp-web
 getent group yanp-nas-deny >/dev/null || groupadd --system yanp-nas-deny
 usermod -a -G yanp-web www-data

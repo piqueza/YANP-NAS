@@ -8,6 +8,7 @@ import time
 from .core import Error, require, uuid_value
 from .filesystems import SUPPORTED, mount_capability
 from .initialize import initialize_capability, finish_format_candidate
+from .erase import destructive_policy, deletion_candidate
 
 
 class Devices:
@@ -91,6 +92,7 @@ class Devices:
                     sysfs = Path('/sys/dev/block') / node['maj:min']
                     if node.get('type') == 'disk':node['disk_sequence'] = (sysfs / 'diskseq').read_text().strip()
                     node['holders'] = [p.name for p in (sysfs / 'holders').iterdir()]
+                    if node.get('type') == 'part':node['partition_number'] = int((sysfs/'partition').read_text())
                 except (OSError, KeyError):
                     node['disk_sequence'], node['holders'] = None, None
             for mount in node.get("mountpoints") or []:
@@ -108,6 +110,12 @@ class Devices:
             node.update(mount_capability(node, counts.get(node.get('uuid'), 0)))
             node.update(initialize_capability(node))
             node['can_finish_format'] = finish_format_candidate(node, list(flat.values()))
+            if node.get('type') == 'disk':
+                node['reinitialize_block_reason'] = destructive_policy(node,list(flat.values()),allow_raid=True)
+                node['can_reinitialize'] = not node['reinitialize_block_reason']
+            if node.get('type') == 'part':
+                candidates=[d for d in flat.values() if d.get('type') == 'disk' and node.get('physical_disks') == [d['path']]]
+                node['can_delete_partition'] = len(candidates) == 1 and deletion_candidate(node,candidates[0],list(flat.values()))
         return {"observed_at": int(time.time()), "devices": list(flat.values())}
 
     def volume(self, uuid, mounted=False, write=False, check_permissions=True):

@@ -70,7 +70,8 @@ occupying the whole disk should be mounted directly instead of initialized.
 
 **No signature does not prove the absence of valuable data.** Raw data and
 damaged/unrecognized filesystems may be undetectable. Initialize only a disk you
-know can be overwritten. There is no existing-data resize/repartition/wipe flow.
+know can be overwritten. A separate explicitly destructive erase/reinitialize flow is described below;
+there is no resize or data-preserving repartitioning flow.
 If creation partially fails, the job records that the table or filesystem may
 have been written. No rollback, erase or destructive retry is attempted; inspect
 the disk locally.
@@ -182,3 +183,212 @@ Reload the browser and open Storage after the updater succeeds. No disks are
 automatically mounted during the update. The fresh reinstall option remains
 available separately and discards application settings as described in
 [REINSTALL.md](REINSTALL.md).
+
+## Browse an imported volume
+
+After mounting a data filesystem through Storage, select Browse contents in its
+partition row. Administrators can view folders, file names, individual file
+sizes and modification times, including hidden entries. Use Volume root, Up one
+folder, Refresh folder and Previous/Next page to navigate 200 entries at a time.
+Directory sizes are not recursively calculated by this browser. The listing may
+change if another process creates, moves or removes files while paging.
+
+This is metadata-only browsing: it does not preview/download files, edit, delete,
+execute, change ownership or adopt existing folders as managed share directories.
+Both read-only and read/write mounted volumes can be inspected without changing
+root permissions. Only unique, supported, currently mounted data filesystems
+approved by YANP Nas are eligible; OS/external mounts remain protected. Standard
+web users do not receive arbitrary volume browsing access.
+
+Symlinks and special files are listed without being opened. Each traversed folder
+must stay on the selected mount, including mount identity checks that reject
+same-device bind mounts. Nested mount entries are labelled Mounted filesystem
+and cannot be entered. Unreadable/vanished entries are listed as unavailable.
+Non-UTF-8 names are displayed with byte escapes and cannot be entered through the
+UI. Paths have depth/length limits; no client-provided absolute path is accepted.
+
+## Erase/reinitialize a disk or delete a partition
+
+Administrators can select Erase & reinitialize on an eligible unmounted data disk.
+The preview lists its model, serial, stable identity, device path and all affected
+partitions. Choose ext4 (default), Btrfs or NTFS, type the exact displayed phrase
+such as `FORMAT /dev/sdz`, and accept the data-loss acknowledgement. This removes
+old partition/filesystem signatures and creates one GPT data partition using the
+existing guarded initializer. Mount the new filesystem separately afterward.
+The displayed Linux device path is used in the phrase to distinguish disks;
+friendly aliases alone are not used as destructive identities.
+
+Delete partition requires a separate preview and phrase such as
+`DELETE /dev/sdz1`. It removes only that table entry, preserving other partition
+entries. Free space is not automatically reused. GPT entries and non-extended
+DOS primary partitions are supported; DOS extended/logical deletion requires
+local tooling. This is not a general free-space/multiple-partition editor.
+
+All partitions on the physical disk must be unmounted. OS/external mounts,
+active swap, read-only devices, holders, active RAID/LVM/encryption mappings, unsupported
+signatures and shared/duplicate filesystem UUIDs cause refusal. Other queued/running
+operations must finish first, and scheduled shutdown/reboot blocks the action. Filesystems
+with managed directory records, backup destinations or automatic mount preferences
+are refused; no configuration records are silently removed. Some configuration
+removal currently requires local administration because the UI does not offer
+all definition-removal operations.
+
+The five-minute confirmation includes the kernel disk generation, physical
+identity, partition ranges and full table layout. Those checks, signatures and
+use are repeated immediately before writing; kernel/table identities and ranges
+must agree. Native locking and in-use checks remain enabled, without force or
+no-reread overrides. Failure can leave partly erased data or an incomplete table;
+there is no rollback or automatic retry. Both success and failure become OK-only
+results; Enter dismisses rather than submits again. Reopening requires a fresh
+live preview and confirmation. These operations are not secure data erasure. Whole-DOS erasure removes the
+outer table and data-filesystem signatures without force-wiping extended
+containers; obsolete interior EBR sectors can remain as unreachable data.
+
+## Disable an automatic mount
+
+Unmounting preserves the saved startup preference. To remove that preference,
+use Disable auto mount beside the partition, or use Storage → Automatic mounts.
+The list also includes saved offline filesystems, so a drive does not need to be
+mounted or connected merely to disable its startup preference. The action uses
+the UUID stored with that preference and updates it only after systemd confirms
+the app-owned unit is disabled. It leaves a currently mounted volume mounted;
+unmount separately before erasing. Files, shares and backup definitions are kept.
+
+Only YANP Nas mount units with matching source/target and no external overrides
+are disabled. External, symlinked or mismatched units require local management.
+An absent unit can have its stale database preference cleared if no foreign unit
+is loaded at that path. Nothing is mounted, unmounted, erased or reformatted.
+Erasure refusal messages identify the particular partition/UUID and list actual
+managed-directory, backup-destination and automatic-mount blockers separately.
+Disabling an automatic mount does not remove the other dependencies.
+
+## Review storage signatures before erasing
+
+Inspect signatures on a data-disk row shows the native signature type, device,
+offset and available label/UUID. This is read-only. Recognized signatures include
+GPT and its protective MBR, which wipefs reports as uppercase PMBR. Older feature
+builds compared that uppercase spelling to a lowercase allowlist and incorrectly
+refused normal GPT disks. Signature matching is now case-insensitive.
+
+For recognized metadata, Review erase & reinitialize opens the existing typed
+FORMAT confirmation; erasing that disk removes its old signatures as part of
+reinitialization. All existing protection, mount, holder, reference and live
+identity/layout checks still apply. The inspection view does not grant permission
+to write or bypass those checks. Truly unsupported signatures are named with
+their device and remain blocked for local storage administration. No generic
+force-wipe operation is exposed. Normal GPT metadata needs no separate clearing
+step or shell workaround after this update.
+
+## Reclaim a retired RAID member
+
+NTFS itself does not prevent reinitialization. A disk-level isw_raid_member
+signature is Intel firmware-RAID metadata and can coexist with DOS/GPT tables
+and ordinary NTFS partitions. Whole-disk Erase & reinitialize now supports known
+inactive isw_raid_member, linux_raid_member and ddf_raid_member signatures. Other
+unknown formats, LVM and encrypted containers remain outside this flow.
+
+The preview lists the detected RAID types and devices, requires the exact FORMAT
+phrase and normal data-loss acknowledgement, and additionally requires confirming
+that the disk is no longer needed by its old RAID array. Removing membership can
+make that array unrecoverable. Only the selected disk is changed; other members
+are never stopped, detached, assembled or written by this action. The software
+cannot establish whether a retired disk is needed for recovery on another host;
+the owner must make that decision before acknowledging reclamation.
+
+Active or assembled Linux MD devices, device-mapper holders, mounts, swap,
+protected/OS devices, read-only storage and managed dependencies remain blocked.
+Live kernel membership and use are checked before each destructive step. Shared
+RAID UUIDs are accepted only for idle metadata-bearing member devices; ordinary
+duplicate filesystem UUIDs and active peer members remain blocked. Individual
+partition deletion remains unavailable while RAID metadata is present; reclaim
+the entire disk to remove that membership before creating a new layout.
+
+The confirmation fingerprint now includes the exact signature inventory as well
+as device generation, partition identities and table. A changed signature, UUID,
+offset or label invalidates the preview. If udev masks a table behind RAID
+metadata, the native GPT/DOS table must still agree with every kernel partition's
+number, parent, range and size. Unexpected table errors are refused. Remaining
+signatures after wipefs stop the operation before formatting. A targeted change
+event refreshes the selected disk's udev metadata; the initializer waits for stale
+RAID/filesystem/partition observations to clear. Native in-use locks, normal
+formatter checks and OK-only/no-retry results are retained; no force flags are
+used by runtime erasure commands.
+
+Native Intel signature tests follow the documented probe layout in
+[util-linux's libblkid Intel RAID probe](https://github.com/util-linux/util-linux/blob/master/libblkid/src/superblocks/isw_raid.c).
+Regular-file tests do not emulate controller firmware, live array management,
+4K-sector RAID metadata or udev behavior on real hardware. First target-server
+acceptance must use a disposable retired disk selected and confirmed by its owner.
+
+### Overlapping DOS/Atari signatures
+
+A DOS boot sector can also satisfy libblkid's Atari partition-table heuristic.
+Whole-disk reclamation accepts the additional `atari` signature only when the
+same disk has a GPT/DOS signature and its native GPT/DOS table has been correlated
+with every live kernel partition. It does not enable Atari partition editing or
+allow an Atari signature inside a partition. RAID acknowledgement and all idle,
+identity, dependency and post-erasure checks still apply. Unrecognized signatures
+remain blocked; a whole-disk refusal now says explicitly that this action cannot
+reclaim them. The action is labeled **Erase & reinitialize whole disk…**.
+
+## Advanced Disk Actions: whole-disk cloning (first draft)
+
+Open **Advanced Disk Actions**, directly below **Storage** in the sidebar, then
+**Clone a disk**. Select source and destination, review the pair and type
+`CLONE /dev/<destination>` exactly. Confirm destination data loss. USB and internal
+physical disks are eligible regardless of filesystem or partition-table format.
+Both disks' partitions must be unmounted and free of active mappings/swap. Live OS disks are blocked as clone sources and destinations, including Btrfs.
+A Btrfs filesystem snapshot is not a raw whole-disk source for ddrescue. Use the
+system-state migration installer for host migration. Whole-disk copying covers
+one physical disk, not an entire multi-disk RAID set or a coordinated filesystem
+snapshot. An offline source is preferred when consistency matters.
+
+The destination must be writable, at least as large as the source, and have the
+same logical sector size. OS/external mounts, active RAID/mappings, unknown device
+use and saved target dependencies (directories, backup destinations and automatic
+mounts) block writes. Disable automatic mounting and remove target dependencies
+first. Source and destination must have distinct stable IDs and block identities;
+confirmation binds their generation, sizes and observed partition identities for
+five minutes. Checks repeat immediately before copying. Idle sources and targets
+are held open exclusively and flocked. Inherited pinned descriptors are passed directly
+to the copy process and live generation checks continue while it runs.
+
+Both modes use **GNU ddrescue** (Debian package `gddrescue`):
+
+- Fast: skip trimming, scraping and retry passes. Suitable for a healthy source.
+- **The source disk is damaged or suspect**: visibly selects slower rescue mode,
+  including trimming, scraping and up to three retry passes. Recovery is not
+  guaranteed; unreadable ranges may retain old destination bytes.
+
+Unlike formatting commands, ddrescue requires its `--force` switch to authorize
+block-device output. That fixed switch follows the clone-specific confirmations,
+exclusive destination open and all live safety checks; clients cannot supply
+commands, flags, map paths or arbitrary device paths. Modes and map semantics
+follow the [GNU ddrescue manual](https://www.gnu.org/software/ddrescue/manual/ddrescue_manual.html).
+
+Queued/running clones show a paired **Disk Clone In Action** card with recovered
+bytes, progress, unreadable bytes and live command output. Storage replaces both
+disks' partition tables/actions with compact identifier/SMART cards and a red
+**Part of ongoing cloning action** notice. The global storage job lock remains
+held during copying; other storage changes wait. Closing the browser does not
+stop the job. Finished/failed reports appear under **Disk clone log** here and in
+**Activity & Notifications**; the usual operation detail view provides the retained
+command log. Result/error history is administrator-only. Logs use the existing
+bounded job log; recovery maps are retained privately at
+`/var/lib/yanp-nas/clones/<job-id>.map`.
+
+A zero process exit alone is insufficient: every source byte must be marked
+rescued in the complete map, output must sync successfully and the target's
+partition reread/udev refresh must succeed before the job is marked completed.
+Failures report a potentially partial destination and retain progress/map data.
+There is no automatic retry or resume after interruption. Agent restart marks a
+running job failed. This draft has no pause/cancel/resume buttons, checksum
+verification pass, automatic partition resizing, GPT backup-header relocation or
+UUID regeneration. A larger GPT destination can need header relocation before
+use. Cloning duplicates filesystem/partition UUIDs; keep the clone unmounted until
+those identities are resolved. No cloned filesystem is automatically mounted.
+
+## System-state migration
+
+The **Generate system-state installer** action on Advanced Disk Actions is
+available regardless of OS filesystem/snapshot support. See [migration instructions](MIGRATION.md).

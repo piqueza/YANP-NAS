@@ -62,6 +62,9 @@ Use the UI's operation log for command output and actual completion status.
 Do not unplug USB media until its unmount job completes. A busy mount fails
 normally; no lazy or forced unmount is performed. Persistent preferences survive
 manual unmount; the approved filesystem is mounted on the next boot if present.
+Disable a saved startup preference from Storage → Automatic mounts, or the
+partition’s Disable auto mount control. This leaves any live mount in place;
+unmount separately before erasing.
 
 Sign-in uses the canonical `/api.php?route=login` endpoint so Apache's login
 Fail2ban filter sees every authentication attempt. Alternate query/script URL

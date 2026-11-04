@@ -2,6 +2,53 @@
 
 ## 0.2.0 — 2026-10-31
 
+- Fix system-state exports rejected as incomplete Samba inventories: use locked
+  read-only TDB backups instead of same-backend pdbedit export. Restore the
+  verified passdb atomically with Samba stopped and keep the original database
+  in the private backup. Preserve inventory checks and add native credential/SID
+  roundtrip coverage plus the explicit tdb-tools installer/updater dependency.
+
+- Block all live OS whole-disk clones, including Btrfs, rather than copying a
+  changing block device. Add a private system-state migration ZIP with web/Samba
+  accounts, database/history, share/backup definitions and a root-console restore
+  installer. Verify existing UID/GID identities; do not migrate Linux account
+  files or apply old host IP/hostname. Include manual setup notes and sensitive
+  credential acknowledgement, retain target pre-restore state, and keep pending
+  jobs and storage schedules inactive until review.
+
+- Add Advanced Disk Actions with whole-disk fast/rescue clones using GNU ddrescue,
+  exact destination confirmation, live-OS source acknowledgement, pinned devices,
+  progress/error reporting, reserved Storage cards and shared Activity reports.
+  Install gddrescue on fresh installs and feature updates. Retain private recovery
+  maps; pause/cancel/resume and UUID repair are not included in this first draft.
+
+- Permit an overlapping Atari signature only on a whole disk with a verified
+  GPT/DOS table and matching kernel partitions; retain RAID acknowledgement and
+  refuse nested/standalone Atari metadata. Clarify whole-disk action labels and
+  unsupported-signature errors.
+
+- Allow explicitly acknowledged whole-disk reclamation of inactive Intel ISW,
+  Linux MD and DDF RAID-member metadata alongside plain NTFS/data partitions.
+  Keep active mappings blocked, fingerprint signature inventories, verify erasure,
+  refresh only the selected disk’s udev state and validate masked partition tables.
+
+- Recognize native uppercase PMBR protective-MBR signatures on normal GPT disks;
+  this previously caused a false unsupported-signature refusal. Add read-only
+  signature inspection with exact device/type/offset and a guarded erase link.
+
+- Add Disable auto mount controls beside saved volume preferences and in a
+  Storage list that includes offline volumes. Disable only verified app-owned
+  startup units, preserve live mounts/data, and name exact erasure blockers.
+
+- Add explicitly confirmed whole-disk erase/reinitialize and individual GPT/DOS
+  primary partition deletion. Require FORMAT/DELETE plus the live device path,
+  five-minute layout/identity checks, idle/unmounted data storage and no managed
+  dependencies. Refuse protected/mapped/shared devices and keep results terminal.
+
+- Add administrator-only read-only browsing of mounted data volumes from
+  Storage, with file metadata, folder navigation and paged listings. Pin paths
+  and reject symlink/nested-mount traversal, including same-device bind mounts.
+
 - Fix APT's failed `_apt` identity switch under the agent sandbox by explicitly
   retaining CAP_SETUID. Feature updates now back up, deploy/reload and roll back
   the installed agent service unit together with application code.

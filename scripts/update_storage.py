@@ -147,7 +147,7 @@ def main():
     require(not Path('/var/lib/yanp-nas/firewall-pending.json').exists(), 'Finish the pending firewall change first')
     run = Runner()
     run.run(['apt-get', 'update'], timeout=600)
-    run.run(['apt-get', 'install', '-y', 'ntfs-3g', 'btrfs-progs', 'fdisk', 'e2fsprogs', 'udev'], timeout=600)
+    run.run(['apt-get', 'install', '-y', 'tdb-tools', 'gddrescue', 'ntfs-3g', 'btrfs-progs', 'fdisk', 'e2fsprogs', 'udev'], timeout=600)
     stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     backup = Path('/var/backups/yanp-nas') / ('storage-update-' + stamp)
     backup.mkdir(parents=True, mode=0o700)

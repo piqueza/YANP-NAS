@@ -17,7 +17,7 @@ const icon = name => {
 };
 let user=null, csrf='', state={}, page='dashboard', stream=null, lastRefresh=0, refreshing=false, wizardStep=0, cpuSample=null, cpuPercent=null;
 const isAdmin=()=>user?.role==='admin';
-const nav=[['dashboard','Dashboard'],['storage','Storage'],['shares','Shares & Permissions'],['backups','Backups'],['users','Users'],['system','System'],['network','Network & Security'],['activity','Activity & Notifications'],['settings','Settings']];
+const nav=[['dashboard','Dashboard'],['storage','Storage'],['advanced-disks','Advanced Disk Actions'],['shares','Shares & Permissions'],['backups','Backups'],['users','Users'],['system','System'],['network','Network & Security'],['activity','Activity & Notifications'],['settings','Settings']];
 
 async function api(route, data) {
   const activeSession=user;
@@ -117,7 +117,7 @@ async function loginView() {
 
 function shell() {
   const allowed=isAdmin()?nav:nav.filter(([key])=>['dashboard','storage','shares','backups','settings'].includes(key));
-  $('#app').innerHTML=`<div class="layout"><aside class="sidebar"><a class="wordmark" href="#dashboard"><span class="brandmark">Y</span>YANP Nas</a><div class="sidebar-label">WORKSPACE</div><nav>${allowed.map(([key,name])=>`<a href="#${key}" class="${key===page?'selected':''}">${icon(key)}<span>${name}</span>${key==='activity'&&notificationCount('all')?'<i class="dot"></i>':''}</a>`).join('')}</nav><div class="sidebar-bottom"><div class="host"><span class="host-dot"></span><div>${esc(state.system?.hostname||'YANP Nas')}<small>${esc(state.system?.os||'Private management console')}</small></div></div><div class="profile"><span class="avatar">${esc(user.display_name.slice(0,1).toUpperCase())}</span><div>${esc(user.display_name)}<small>${isAdmin()?'Administrator':'Standard user'}</small></div>${btn('↪','logout','','icon-button logout')}</div></div></aside><main class="workspace"><header><div class="breadcrumb">Workspace <span>/</span> ${esc(nav.find(n=>n[0]===page)?.[1]||'Dashboard')}</div><div class="header-right"><span class="live" id="live"><i></i>Connected</span>${btn('↻ Refresh','refresh','','quiet')}</div></header><div id="content"></div><footer>YANP Nas <span>System state comes from Linux · All times shown locally</span></footer></main></div>`;
+  $('#app').innerHTML=`<div class="layout"><aside class="sidebar"><a class="wordmark" href="#dashboard"><span class="brandmark">Y</span>YANP Nas</a><div class="sidebar-label">WORKSPACE</div><nav>${allowed.map(([key,name])=>`<a href="#${key}" class="${key===page?'selected':''}${key==='advanced-disks'?' subnav':''}">${icon(key)}<span>${name}</span>${key==='activity'&&notificationCount('all')?'<i class="dot"></i>':''}</a>`).join('')}</nav><div class="sidebar-bottom"><div class="host"><span class="host-dot"></span><div>${esc(state.system?.hostname||'YANP Nas')}<small>${esc(state.system?.os||'Private management console')}</small></div></div><div class="profile"><span class="avatar">${esc(user.display_name.slice(0,1).toUpperCase())}</span><div>${esc(user.display_name)}<small>${isAdmin()?'Administrator':'Standard user'}</small></div>${btn('↪','logout','','icon-button logout')}</div></div></aside><main class="workspace"><header><div class="breadcrumb">Workspace <span>/</span> ${esc(nav.find(n=>n[0]===page)?.[1]||'Dashboard')}</div><div class="header-right"><span class="live" id="live"><i></i>Connected</span>${btn('↻ Refresh','refresh','','quiet')}</div></header><div id="content"></div><footer>YANP Nas <span>System state comes from Linux · All times shown locally</span></footer></main></div>`;
   render();
 }
 function pageHeader(eyebrow,title,description,buttons='') {
@@ -145,6 +145,29 @@ function dashboard() {
 function directoriesTable() {
   return (state.directories||[]).length?`<div class="table-scroll"><table><thead><tr><th>Directory</th><th>Volume</th><th>${isAdmin()?'Access':'Your access'}</th><th></th></tr></thead><tbody>${state.directories.map(d=>`<tr><td><strong>${esc(d.name)}</strong></td><td><strong>${esc(volumeName(d.volume_uuid))}</strong><small><code>${esc(d.volume_uuid)}</code></small></td><td>${isAdmin()?`${(state.access||[]).filter(a=>a.directory_id===d.id).length} users`:badge(d.mode==='rw'?'Read / write':'Read only')}</td><td>${isAdmin()?btn('Permissions','permissions',`data-id="${d.id}"`,'quiet')+btn('Rename','rename',`data-id="${d.id}"`,'quiet'):''}</td></tr>`).join('')}</tbody></table></div>`:empty('No directories have been assigned yet.');
 }
+const activeClones=()=> (state.clone_jobs||[]).filter(j=>['queued','running'].includes(j.status));
+const cloneDisk=id=>(state.devices?.devices||[]).find(d=>d.type==='disk'&&d.stable_id===id);
+const cloneDiskLabel=id=>{const d=cloneDisk(id);return d?`${d.disk_display_name||d.model||d.path} · ${d.path} · ${bytes(d.size)} · ${d.serial||'No serial'}`:id;};
+const cloningDisk=d=>activeClones().some(j=>[j.params?.source,j.params?.destination].includes(d.stable_id));
+function cloneReport(j) {
+  const r=j.result||{},source=r.source?.stable_id||j.params?.source,target=r.destination?.stable_id||j.params?.destination;
+  const percent=Math.min(100,Math.max(0,Number(r.percent)||0));
+  return `<div class="row">${badge(j.status)}<strong>${j.params?.rescue?'Rescue clone · GNU ddrescue (slower)':'Fast clone · GNU ddrescue'}</strong></div><p><strong>Source:</strong> ${esc(cloneDiskLabel(source))}<br><strong>Destination:</strong> ${esc(cloneDiskLabel(target))}</p><progress aria-label="Disk clone bytes recovered" max="100" value="${percent}" class="clone-progress"></progress><p>${percent}% recovered · ${contentBytes(r.rescued_bytes||0)} / ${contentBytes(r.total_bytes)} · ${contentBytes(r.bad_bytes||0)} unreadable</p>${r.output_tail?`<details open><summary>Live output / errors</summary><pre>${esc(r.output_tail)}</pre></details>`:''}${r.progress_note?`<p class="muted">${esc(r.progress_note)}</p>`:''}${j.error||r.error?`<div class="notice warning" role="alert">${esc(j.error||r.error)}</div>`:''}${r.warning?`<p class="small muted">${esc(r.warning)}</p>`:''}<p>${esc(when(j.started_at||j.created_at))}${j.ended_at?' → '+esc(when(j.ended_at)):''}</p>${btn('View full report and command log','job',`data-id="${esc(j.id)}"`)}<details><summary>Clone report</summary><pre>${esc(JSON.stringify(r,null,2))}</pre></details>`;
+}
+function stateInstallerHistory() {
+  const jobs=(state.jobs||[]).filter(j=>j.operation==='system.state_export');
+  return panel('System-state installers',jobs.map(j=>`<div class="row">${badge(j.status)}<span class="grow">${esc(when(j.created_at))}</span>${j.error?`<span>${esc(j.error)}</span>`:''}${btn('View installer location / report','job',`data-id="${esc(j.id)}"`)}</div>`).join('')||empty('No system-state installers generated yet.'));
+}
+function cloneHistory() {
+  const history=(state.clone_jobs||[]).filter(j=>!['queued','running'].includes(j.status));
+  return panel('Disk clone log',history.length?history.map(j=>`<div class="backup-row"><div class="grow">${cloneReport(j)}</div></div>`).join(''):empty('No completed disk clone operations yet.'));
+}
+function advancedDisksPage() {
+  const busy=activeClones();
+  return pageHeader('STORAGE','Advanced Disk Actions','Clone an entire disk, including its partition table and filesystems.',(busy.length?'':btn('Clone a disk','clone-new','','primary'))+btn('Generate system-state installer','state-export'))+
+    busy.map(j=>panel('Disk Clone In Action',cloneReport(j))).join('')+
+    panel('Whole-disk cloning','<p>USB and internal physical disks are supported. Unmount all source and destination partitions first. Live OS disk cloning is disabled, including Btrfs: a filesystem snapshot is not a raw disk source. Use the system-state migration installer to move to new hardware.</p><p>The destination must be at least as large as the source and have the same logical sector size. Saved destination directories, backups and automatic mounts must be removed first. Cloning overwrites destination data.</p><p>Choose a slower rescue clone for damaged or suspect sources. Recovery maps are retained on the NAS. This first draft does not offer pause, cancellation or automatic resume.</p>')+panel('System-state migration','<p>Prepare a fresh NAS to continue this NAS’s configuration, web/Samba accounts, database and history with the same migrated data disks.</p><p>The private ZIP includes an installer and MANUAL-SETUP.md for source hostname/IP and required existing Linux UID/GID accounts. It does not copy Linux account files or apply network settings. Automatic mounts and backup schedules require review on the new host.</p>')+stateInstallerHistory()+cloneHistory();
+}
 function storagePage() {
   if(!isAdmin()) return pageHeader('STORAGE','Your storage','Capacity is shared with other users of the same volume.')+panel('Assigned volumes',(state.volumes||[]).map(v=>`<div class="row"><strong>${esc(v.display_name||v.uuid)}</strong><small>${esc(v.uuid)}</small>${badge(v.space?'Mounted':'Unavailable')}<span>${bytes(v.space?.free)} free</span></div>`).join('')||empty('No assigned volumes.'),observed(state.observed_at));
   const all=state.devices?.devices||[];
@@ -152,13 +175,17 @@ function storagePage() {
     (!all.length?empty('No disks have been observed. Check the agent and refresh.'):all.filter(d=>d.type==='disk').map(d=>{
       const parts=all.filter(p=>p.path===d.path||p.physical_disks?.includes(d.path));
       const smart=state.smart?.reports?.[d.stable_id], temp=smart?.temperature?.current;
+      if(cloningDisk(d))return panel(`<span class="disk-title">${icon('storage')}${esc(d.disk_display_name||d.model||d.path)}</span>`,
+        `<p><span class="badge danger">⚠ Part of ongoing cloning action.</span></p><p><strong>${esc(d.path)}</strong> · ${esc(d.serial||'No serial')} · ${bytes(d.size)}</p><details><summary>Device identifiers &amp; SMART details</summary><p><code>${esc(d.stable_id)}</code></p><pre>${esc(JSON.stringify(smart||{status:'No SMART report yet'},null,2))}</pre></details><p><a href="#advanced-disks">View Disk Clone In Action</a></p>`);
+
       return panel(`<span class="disk-title">${icon('storage')}${esc(d.disk_display_name||d.display_name||[d.vendor,d.model].filter(Boolean).join(' ')||d.path)}</span>`,
         `<div class="disk-meta"><div><span>MODEL</span><strong>${esc([d.vendor,d.model].filter(Boolean).join(' ')||d.path)}</strong></div><div><span>CAPACITY</span><strong>${bytes(d.size)}</strong></div><div><span>SERIAL</span><strong>${esc(d.serial||'Unavailable')}</strong></div><div><span>CONNECTION</span><strong>${esc(d.tran?.toUpperCase()||'Unknown')}</strong></div><div><span>TEMPERATURE</span><strong>${temp==null?'Unavailable':esc(temp)+' °C'}</strong></div><div><span>SMART</span>${badge(smart?.smart_status?smart.smart_status.passed?'Healthy':'Warning':smart?.collection_state||'Not collected')}</div></div><details><summary>Device identifiers & SMART details</summary><p><code>${esc(d.path)}</code></p><p><code>${esc(d.stable_id||'No stable by-id link')}</code></p><p>${observed(state.smart?.observed_at)}</p>${d.stable_id?btn('Read SMART without waking standby disk','smart',`data-id="${esc(d.stable_id)}"`):''}<pre>${esc(JSON.stringify(smart||{status:'No SMART report yet'},null,2))}</pre></details><div class="table-scroll"><table><thead><tr><th>Partition / device</th><th>Filesystem</th><th>Capacity</th><th>State</th><th></th></tr></thead><tbody>${parts.map(p=>{
           const mounted=!!p.mounted_by_manager, external=(p.mountpoints||[]).filter(Boolean);
+          const automatic=(state.volumes||[]).some(v=>v.uuid===p.uuid&&v.persistent);
           const status=p.protected?'OS / external mount':mounted?(p.mount_read_only?'Mounted (read-only)':'Mounted'):p.has_partitions?'Partitioned disk':!p.fstype?'No filesystem':'Unmounted';
-          return `<tr><td><strong>${esc(p.uuid?volumeName(p.uuid):p.path)}</strong>${p.uuid?`<small>${esc(p.path)}</small>`:''}<small>${esc(p.uuid||'No filesystem UUID')}</small>${p.parttypename||p.partlabel?`<small>${esc([p.parttypename,p.partlabel].filter(Boolean).join(' · '))}</small>`:''}</td><td>${esc(p.fstype||'—')}${p.mount_driver==='ntfs-3g'?'<small>ntfs-3g</small>':''}</td><td>${bytes(p.size)}${p.space?`<small>${bytes(p.space.free)} free</small>`:''}</td><td>${badge(status)}<small>${esc(external.join(', '))}</small></td><td>${p.can_unmount?btn('Unmount','unmount',`data-id="${esc(p.uuid)}"`,'quiet'):p.can_mount?btn('Mount…','mount',`data-id="${esc(p.uuid)}"`,'primary small'):p.can_finish_format?btn('Finish formatting…','finish-format',`data-id="${esc(p.partuuid)}"`,'primary small'):p.can_initialize?btn('Initialize empty disk…','initialize',`data-id="${esc(p.stable_id)}"`,'primary small'):`<span class="muted small">${esc(p.type==='disk'&&!p.fstype&&!p.has_partitions?p.initialize_block_reason||p.mount_block_reason:p.mount_block_reason||'Refresh device state to see mount options.')}</span>`}${p.uuid&&all.filter(n=>n.uuid===p.uuid).length===1?btn(p.custom_name?'Rename volume':'Name volume','storage-name',`data-kind="volume" data-id="${esc(p.uuid)}"`,'quiet small'):''}</td></tr>`;
+          return `<tr><td><strong>${esc(p.uuid?volumeName(p.uuid):p.path)}</strong>${p.uuid?`<small>${esc(p.path)}</small>`:''}<small>${esc(p.uuid||'No filesystem UUID')}</small>${p.parttypename||p.partlabel?`<small>${esc([p.parttypename,p.partlabel].filter(Boolean).join(' · '))}</small>`:''}</td><td>${esc(p.fstype||'—')}${p.mount_driver==='ntfs-3g'?'<small>ntfs-3g</small>':''}</td><td>${bytes(p.size)}${p.space?`<small>${bytes(p.space.free)} free</small>`:''}</td><td>${badge(status)}<small>${esc(external.join(', '))}</small>${automatic?'<small>Auto mount enabled</small>':''}</td><td>${p.can_unmount?btn('Unmount','unmount',`data-id="${esc(p.uuid)}"`,'quiet'):p.can_mount?btn('Mount…','mount',`data-id="${esc(p.uuid)}"`,'primary small'):p.can_finish_format?btn('Finish formatting…','finish-format',`data-id="${esc(p.partuuid)}"`,'primary small'):p.can_initialize?btn('Initialize empty disk…','initialize',`data-id="${esc(p.stable_id)}"`,'primary small'):`<span class="muted small">${esc(p.type==='disk'&&!p.fstype&&!p.has_partitions?p.initialize_block_reason||p.mount_block_reason:p.mount_block_reason||'Refresh device state to see mount options.')}</span>`}${automatic?btn('Disable auto mount…','disable-auto-mount',`data-id="${esc(p.uuid)}"`,'quiet small'):''}${p.type==='disk'&&p.stable_id&&!p.protected?btn('Inspect signatures','disk-signatures',`data-id="${esc(p.stable_id)}"`,'quiet small'):''}${p.can_reinitialize?btn('Erase & reinitialize whole disk…','disk-reinitialize',`data-id="${esc(p.stable_id)}"`,'quiet small danger-text'):''}${p.can_delete_partition?btn('Delete partition…','partition-delete',`data-id="${esc(p.path)}"`,'quiet small danger-text'):''}${mounted&&!p.protected&&p.uuid?btn('Browse contents','volume-browse',`data-uuid="${esc(p.uuid)}"`,'quiet small'):''}${p.uuid&&all.filter(n=>n.uuid===p.uuid).length===1?btn(p.custom_name?'Rename volume':'Name volume','storage-name',`data-kind="volume" data-id="${esc(p.uuid)}"`,'quiet small'):''}</td></tr>`;
         }).join('')}</tbody></table></div>`,`${observed(state.devices?.observed_at)} ${d.stable_id?btn(d.disk_custom_name?'Rename disk':'Name disk','storage-name',`data-kind="disk" data-id="${esc(d.stable_id)}"`,'quiet small'):''}`);
-    }).join(''))+panel('Managed directories',directoriesTable());
+    }).join(''))+((state.volumes||[]).some(v=>v.persistent)?panel('Automatic mounts',(state.volumes||[]).filter(v=>v.persistent).map(v=>`<div class="row"><div class="grow"><strong>${esc(volumeName(v.uuid))}</strong><br><small>${esc(v.uuid)}</small></div>${btn('Disable auto mount…','disable-auto-mount',`data-id="${esc(v.uuid)}"`,'quiet')}</div>`).join('')):'')+panel('Managed directories',directoriesTable());
 }
 function sharesPage() {
   const host=state.system?.hostname||'NAS-HOST';
@@ -209,7 +236,7 @@ const linkSpeedLabel=interfaceInfo=>{
 };
 function activityPage() {
   return pageHeader('ACTIVITY','A clear record of what happened.','Operations, security events and administrative actions.')+
-    panel('Notifications',state.events.length?state.events.map(e=>`<div class="alert-row">${badge(e.severity)}<p>${esc(e.message)}<small>${esc(e.kind)} · ${esc(when(e.created_at))}</small></p>${!e.acknowledged?btn('Acknowledge','ack',`data-id="${e.id}"`,'quiet'):'<span class="muted small">Acknowledged</span>'}</div>`).join(''):empty('No notifications yet.'),acknowledgeAllButton('all'))+panel('Operations',jobs(50))+
+    panel('Notifications',state.events.length?state.events.map(e=>`<div class="alert-row">${badge(e.severity)}<p>${esc(e.message)}<small>${esc(e.kind)} · ${esc(when(e.created_at))}</small></p>${!e.acknowledged?btn('Acknowledge','ack',`data-id="${e.id}"`,'quiet'):'<span class="muted small">Acknowledged</span>'}</div>`).join(''):empty('No notifications yet.'),acknowledgeAllButton('all'))+panel('Operations',jobs(50))+cloneHistory()+
     panel('Administrative audit',`<div class="table-scroll"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Detail</th></tr></thead><tbody>${state.audit.map(a=>`<tr><td>${esc(when(a.created_at))}</td><td>${esc(state.users.find(u=>u.id===a.actor_id)?.username||'System')}</td><td>${esc(a.action)}</td><td><details><summary>Inspect</summary><pre>${esc(a.details)}</pre></details></td></tr>`).join('')}</tbody></table></div>`);
 }
 function settingsPage() {
@@ -219,7 +246,7 @@ function settingsPage() {
 }
 function render() {
   if(!user||!$('#content')) return;
-  const views={dashboard,storage:storagePage,shares:sharesPage,backups:backupsPage,users:usersPage,system:systemPage,network:networkPage,activity:activityPage,settings:settingsPage};
+  const views={dashboard,storage:storagePage,'advanced-disks':advancedDisksPage,shares:sharesPage,backups:backupsPage,users:usersPage,system:systemPage,network:networkPage,activity:activityPage,settings:settingsPage};
   if(!isAdmin()&&!['dashboard','storage','shares','backups','settings'].includes(page)) page='dashboard';
   $('#content').innerHTML=(views[page]||dashboard)();
   document.querySelectorAll('nav a').forEach(a=>{
@@ -261,6 +288,16 @@ async function enter(u) {
 }
 
 async function clickAction(button) {
+  if(button.dataset.action==='state-export')return dialog('Generate system-state migration installer','<p>Creates a root-only ZIP on the NAS containing the application database and Samba password-equivalent credentials. Copy it privately to the new NAS.</p><p>Install a fresh matching YANP Nas build first and prepare existing Linux accounts with the required UID/GID values. Hostname/IP are listed for manual setup. No data disk is copied or changed.</p>'+check('I understand this ZIP contains sensitive account credentials and will keep it private.','acknowledge_sensitive'),'state-export','Generate private installer');
+
+  if(button.dataset.action==='clone-new') {
+    const disks=(state.devices?.devices||[]).filter(d=>d.type==='disk'&&!cloningDisk(d));
+    const sources=disks.filter(d=>d.clone_source_reason==='').map(d=>[d.stable_id,cloneDiskLabel(d.stable_id)+(d.system_disk?' · LIVE OS SOURCE':'')]);
+    const targets=disks.filter(d=>d.clone_destination_reason==='').map(d=>[d.stable_id,cloneDiskLabel(d.stable_id)]);
+    if(!sources.length||!targets.length)throw Error('An eligible source and an idle writable destination are required. Unmount partitions first.');
+    return dialog('Clone a disk',select('Source disk','source',sources)+select('Destination disk — all data will be overwritten','destination',targets,targets.find(([id])=>id!==sources[0][0])?.[0]||'')+check('The source disk is damaged or suspect','rescue')+'<div class="notice" data-clone-mode>Fast clone: GNU ddrescue without trimming, scraping or retry passes.</div><p>Rescue mode enables slower trimming, scraping and up to three retry passes. Recovery is not guaranteed.</p>','clone-review','Review clone');
+  }
+
   const a=button.dataset.action, id=Number(button.dataset.id);
   if(a==='close') return closeDialog();
   if(a==='navigate') {location.hash=button.dataset.page;return;}
@@ -272,6 +309,21 @@ async function clickAction(button) {
     if(!item)throw Error('Refresh Storage before naming this device.');
     const current=kind==='disk'?item.disk_custom_name:item.custom_name;
     return dialog(kind==='disk'?'Name this disk':'Name this volume',`<p><strong>${esc(kind==='disk'?(item.disk_display_name||item.model||item.path):volumeName(button.dataset.id))}</strong><br><small>${esc(button.dataset.id)}</small></p>${field('Kind','kind','hidden',kind)}${field('Identifier','id','hidden',button.dataset.id)}${field('Display name','name','text',current||'','maxlength="80" autocomplete="off" placeholder="e.g. Archive or Backup drive"')}<p class="small muted">Use this name throughout YANP Nas. Leave it blank to clear the custom name. Disk names also identify their volumes unless a volume has its own name. Filesystem labels, UUIDs and mount paths stay unchanged.</p>`,'storage-name','Save name');
+  }
+  if(a==='disk-signatures') {
+    const report=await api('action',{operation:'storage.signatures',params:{stable_id:button.dataset.id}});
+    const rows=report.signatures.map(s=>`<tr><td><code>${esc(s.path)}</code></td><td>${esc(s.type)}</td><td>${esc(s.offset)}</td><td>${esc(s.label||s.uuid||'—')}</td><td>${s.raid?'RAID metadata — whole-disk reclaim':s.supported?'Recognized':'Unsupported'}</td></tr>`).join('');
+    return dialog('Storage signatures',`<p><strong>${esc(report.device.model||report.device.path)}</strong> · <code>${esc(report.device.path)}</code><br>Serial: ${esc(report.device.serial||'Unavailable')}</p><p class="small muted">Read-only inspection of filesystem and partition-table metadata. GPT, including its protective MBR (PMBR), is recognized.</p>${rows?`<div class="table-scroll"><table><thead><tr><th>Device</th><th>Type</th><th>Offset</th><th>Label / UUID</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>`:empty('No signatures detected.')}${report.block_reason?`<div class="notice warning">${esc(report.block_reason)}</div>`:'<p>To discard this disk’s contents, open the erase preview and confirm the exact device.</p>'}${report.requires_raid_ack?'<div class="notice warning">RAID membership metadata was detected. Reclaiming this disk requires an additional acknowledgement in the erase preview. Other array members are not changed.</div>':''}${report.can_reinitialize?btn('Review whole-disk erase…','disk-reinitialize',`data-id="${esc(report.device.stable_id)}"`,'danger-text'):''}`);
+  }
+  if(a==='disk-reinitialize'||a==='partition-delete') {
+    const deleting=a==='partition-delete',part=deleting?state.devices?.devices.find(p=>p.path===button.dataset.id):null;
+    const disk=deleting?state.devices?.devices.find(d=>d.type==='disk'&&part?.physical_disks?.includes(d.path)):state.devices?.devices.find(d=>d.stable_id===button.dataset.id);
+    if(!disk)throw Error('Refresh Storage before changing this device.');
+    const plan=await api('action',{operation:deleting?'storage.delete_partition_plan':'storage.reinitialize_plan',params:{stable_id:disk.stable_id,...(deleting?{partition:part.path}:{})}});
+    const d=plan.device;
+    const affected=deleting?[plan.partition]:plan.partitions;
+    dialog(deleting?'Delete partition':'Erase and reinitialize disk',`<p><strong>${esc(d.model||d.path)}</strong> · ${bytes(d.size)}</p><p>Disk: <code>${esc(d.path)}</code><br>Serial: <strong>${esc(d.serial||'Unavailable')}</strong><br><small>${esc(d.stable_id)}</small></p><div class="notice warning"><p>${deleting?'This removes the selected partition entry. Access to its data will be lost. Other partition entries are kept; free space is not automatically reused.':'This removes all partitions and filesystems on the selected disk, then creates a GPT table and one new formatted data partition.'}</p><p>There is no undo. This is not secure data erasure.</p></div>${affected.length?`<p>Affected partitions:</p><ul>${affected.map(p=>`<li><code>${esc(p.path)}</code> · ${bytes(p.size)}${p.fstype?' · '+esc(p.fstype):''}</li>`).join('')}</ul>`:'<p>The whole-disk filesystem and any undetected contents will be lost.</p>'}${plan.requires_raid_ack?`<div class="notice warning"><p>RAID metadata will also be removed:</p><ul>${(plan.raid_signatures||[]).map(s=>`<li>${esc(s.type)} on <code>${esc(s.path)}</code></li>`).join('')}</ul><p>This can make the old array unrecoverable. Proceed only if this disk is no longer needed by that array.</p></div>${field('RAID acknowledgement required','raid_required','hidden','1')}${check('I confirm this disk is no longer needed by its RAID array and accept loss of its RAID membership.','acknowledge_raid')}`:''}${deleting?'':select('New filesystem','filesystem',plan.filesystems.map(fs=>[fs,fs==='ext4'?'ext4 (default)':fs]),'ext4','required')}${field('Action','kind','hidden',deleting?'delete':'reinitialize')}${field('Disk','stable_id','hidden',d.stable_id)}${deleting?field('Partition','partition','hidden',plan.partition.path):''}${field('Fingerprint','fingerprint','hidden',plan.fingerprint)}${field('Observed','observed_at','hidden',plan.observed_at)}${field('Type '+plan.confirmation,'confirmation','text','','required autocomplete="off"')}${check('I confirm this is the correct device and accept permanent loss of the affected data.','acknowledge_erase')}<p class="small muted">Confirmation expires after five minutes. Device identity, layout and use are checked again before writing.</p>`,'destructive-storage',deleting?'Delete partition':'Erase and format disk');
+    return;
   }
   if(a==='initialize'||a==='finish-format') {
     const finishing=a==='finish-format';
@@ -293,6 +345,7 @@ async function clickAction(button) {
     const update=()=>{const controls=$('#dialog [data-linux-permissions]');if(controls){controls.hidden=readonly.checked;$('input',controls).required=!readonly.checked;}};
     readonly.addEventListener('change',update);update();return;
   }
+  if(a==='disable-auto-mount')return dialog('Disable automatic mount',`<p><strong>${esc(volumeName(button.dataset.id))}</strong></p>${field('Filesystem UUID','uuid','text',button.dataset.id,'readonly')}<p>This disables automatic mounting at startup. If currently mounted, unmount the volume separately before erasing it.</p>`,'disable-auto-mount','Disable auto mount');
   if(a==='unmount') return dialog('Unmount volume',`<p><strong>${esc(volumeName(button.dataset.id))}</strong></p><p>Close files and disconnect share clients first. Linux refuses busy volumes.</p>${field('UUID','uuid','text',button.dataset.id,'readonly')}`,'unmount','Unmount');
   if(a==='directory') {if(!optionsVolumes(true).length)throw Error('Mount a supported data volume read/write before creating a directory.');return dialog('Create managed directory',select('Writable mounted volume','uuid',optionsVolumes(true))+field('Directory name','name','text','','required maxlength="80"'),'directory','Create');}
   if(a==='rename') { const d=state.directories.find(d=>d.id===id); return dialog('Rename directory',field('ID','id','hidden',id)+field('New name','name','text',d.name,'required maxlength="80"')+'<p class="small muted">Remove its Samba share before renaming, then recreate the share.</p>','rename','Rename'); }
@@ -324,6 +377,7 @@ async function clickAction(button) {
   }
   if(a==='wizard-next'||a==='wizard-back') {if(a==='wizard-next'){const section=$(`[data-step="${wizardStep}"]`);for(const el of section.querySelectorAll('input,select'))if(!el.reportValidity())return;}wizardStep+=a==='wizard-next'?1:-1;updateWizard();return;}
   if(a==='backup-run') return action('backup.run',{id});
+  if(a==='volume-browse')return browseVolume(button.dataset.uuid,JSON.parse(decodeURIComponent(button.dataset.path||'%5B%5D')),Number(button.dataset.offset||0));
   if(a==='backup-inspect') return browseBackup(id,button.dataset.snapshot||'',button.dataset.path||'');
   if(a==='backup-measure') {
     button.disabled=true;
@@ -405,6 +459,15 @@ const backupEntryDate = entry => {
   const label=({completed:'Completed',started:'Started',modified:'Modified'})[entry.date_kind]||'Modified';
   return `<small class="muted">${esc(label)} ${esc(when(date.toISOString()))}</small>`;
 };
+const volumeBrowseButton=(label,uuid,path=[],offset=0)=>btn(label,'volume-browse',`data-uuid="${esc(uuid)}" data-path="${esc(encodeURIComponent(JSON.stringify(path)))}" data-offset="${offset}"`,'quiet small');
+async function browseVolume(uuid,path=[],offset=0) {
+  const result=await api('action',{operation:'storage.browse',params:{uuid,path,offset}});
+  const location=[volumeName(uuid),...result.path].join(' / ');
+  const navigation=volumeBrowseButton('Volume root',uuid)+(result.path.length?volumeBrowseButton('Up one folder',uuid,result.path.slice(0,-1)):'')+volumeBrowseButton('Refresh folder',uuid,result.path,result.offset);
+  const rows=result.entries.map(entry=>`<tr><td>${entry.browseable?volumeBrowseButton(entry.name,uuid,[...result.path,entry.name]):esc(entry.name)}</td><td>${esc(entry.kind)}</td><td>${entry.bytes==null?'—':contentBytes(entry.bytes)}</td><td>${entry.modified_at==null?'—':esc(when(new Date(entry.modified_at*1000).toISOString()))}</td></tr>`).join('');
+  const paging=(result.offset?volumeBrowseButton('Previous page',uuid,result.path,Math.max(0,result.offset-result.limit)):'')+(result.next_offset!=null?volumeBrowseButton('Next page',uuid,result.path,result.next_offset):'');
+  dialog('Volume contents',`<p><strong>${esc(location)}</strong></p><p class="small muted">Read-only browsing${result.read_only?' · Volume mounted read-only':''}. Files are listed with their size and modification time. Symlinks and nested mounted filesystems are not opened.</p><div class="row">${navigation}</div>${rows?`<div class="table-scroll"><table><thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th></tr></thead><tbody>${rows}</tbody></table></div>`:empty('This folder is empty.')}<div class="row">${paging}</div><p class="small muted">Up to ${result.limit} entries per page. The listing can change if files are added or removed.</p>`);
+}
 async function browseBackup(id,snapshot='',path='') {
   const r=await api('action',{operation:'backup.inspect',params:{id,...(snapshot?{snapshot}:{}),...(path?{path}:{})}});
   dialog('Backup contents',`<p><code>${esc(r.path||'Snapshots')}</code></p>${snapshot?btn('All backups','backup-inspect',`data-id="${id}"`,'quiet'):''}${measureBackupButton(id,snapshot,path,snapshot?'Calculate disk usage':'Calculate total disk usage')}${snapshot&&isAdmin()&&r.complete!==false?btn(snapshot==='current'?'Copy rolling backup back':'Copy this snapshot back','backup-restore',`data-id="${id}" data-snapshot="${esc(snapshot)}"`,'primary'):''}${r.note?`<div class="notice">${esc(r.note)}</div>`:''}<div class="table-scroll"><table><thead><tr><th>Name</th><th>Type</th><th>Content size</th></tr></thead><tbody>${r.entries.map(e=>`<tr><td>${e.directory?btn(!snapshot&&e.name==='current'?'Current backup':e.name,'backup-inspect',`data-id="${id}" data-snapshot="${esc(snapshot||e.name)}" data-path="${esc(snapshot?[path,e.name].filter(Boolean).join('/'): '')}"`,'quiet'):esc(e.name)}${backupEntryDate(e)}</td><td>${e.symlink?'Symlink (not followed)':e.directory?'Directory':'File'}</td><td>${e.symlink?'—':contentBytes(e.bytes)}${e.directory?`<small>${measureBackupButton(id,snapshot||e.name,snapshot?[path,e.name].filter(Boolean).join('/'):'')}</small>`:''}</td></tr>`).join('')}</tbody></table></div><p class="small muted">Up to ${r.limit} entries shown. Symlinks are not followed.</p><p class="small muted">Sizes are logical file lengths, including nested files in directories. Hard-linked snapshots share storage; these sizes cannot be added to measure disk usage. Large, changing or unreadable folders may show “Not calculated”. ${isAdmin()?'Use Calculate disk usage for a full allocated-space measurement that runs in the background.':'Open a smaller folder to inspect its entries.'}</p>`);
@@ -412,10 +475,42 @@ async function browseBackup(id,snapshot='',path='') {
 async function submit(form) {
   const p=Object.fromEntries(new FormData(form)), type=form.dataset.form;
   const checked=name=>!!form.elements[name]?.checked;
+  if(type==='state-export') {
+    if(!checked('acknowledge_sensitive'))throw Error('Acknowledge that the migration ZIP contains sensitive credentials.');
+    const r=await action('system.state_export',{acknowledge_sensitive:true});closeDialog(true);return r;
+  }
+  if(type==='clone-review') {
+    const plan=await api('action',{operation:'storage.clone_plan',params:{source:p.source,destination:p.destination,rescue:checked('rescue')}});
+    const hidden=['source','destination','fingerprint','observed_at','confirmation'].filter(k=>k!=='confirmation').map(k=>field(k,k,'hidden',k==='source'?p.source:k==='destination'?p.destination:plan[k])).join('');
+    return dialog('Confirm whole-disk clone',`<p><strong>Source:</strong> ${esc(cloneDiskLabel(p.source))}<br><strong>Destination:</strong> ${esc(cloneDiskLabel(p.destination))}</p><div class="notice warning">All destination data will be overwritten. ${plan.rescue?'SLOWER RESCUE MODE: GNU ddrescue with three retry passes.':'FAST MODE: GNU ddrescue without trimming, scraping or retry passes.'}</div><p>Cloning duplicates UUIDs. Keep the clone unmounted until duplicate identities are resolved. A larger GPT destination may require backup-header relocation. Failed reads can leave old destination bytes.</p>${plan.live_source?'<div class="notice warning">The source OS is running. Its data can change during copying; this clone may be inconsistent. An offline clone is more reliable.</div>':''}${hidden}${field('Rescue mode','rescue','hidden',plan.rescue?'1':'0')}${field('Type '+plan.confirmation,'confirmation','text','','required autocomplete="off"')}${check('I confirm the destination and accept loss of all its data.','acknowledge_erase')}${plan.live_source?check('I accept that the running OS source may produce an inconsistent clone.','acknowledge_live'):''}`,'clone-start','Start disk clone');
+  }
+  if(type==='clone-start') {
+    if(form.dataset.cloneSubmitted)return;
+    if(!checked('acknowledge_erase'))throw Error('Acknowledge destination data loss.');
+    const params={source:p.source,destination:p.destination,rescue:p.rescue==='1',fingerprint:p.fingerprint,observed_at:Number(p.observed_at),confirmation:p.confirmation,acknowledge_erase:true,acknowledge_live:checked('acknowledge_live')};
+    const result=await api('action',{operation:'storage.clone',params});
+    form.dataset.cloneSubmitted='true';closeDialog(true);location.hash='#advanced-disks';await refresh();return result;
+  }
   if(type==='login') {const r=await api('login',p);return enter(r.user);}
   if(type==='setup') {await api('setup',p);toast('Administrator created. Sign in to continue.');return loginView();}
   if(type==='user-create'||type==='user-edit')return saveUser(form,p);
   if(type==='share')return saveShare(form,p);
+  if(type==='destructive-storage') {
+    if(form.dataset.initializationAttempted)return;
+    if(!checked('acknowledge_erase'))throw Error('Confirm the data-loss acknowledgement before continuing.');
+    if(p.raid_required==='1'&&!checked('acknowledge_raid'))throw Error('Confirm that this disk is no longer needed by its RAID array.');
+    if(!['delete','reinitialize'].includes(p.kind))throw Error('Unknown storage action.');
+    form.dataset.initializationAttempted='true';
+    try {
+      progress(form,p.kind==='delete'?'Deleting the selected partition…':'Erasing the disk, then creating and formatting its new partition…');
+      await completedAction(p.kind==='delete'?'storage.delete_partition':'storage.reinitialize',{stable_id:p.stable_id,fingerprint:p.fingerprint,observed_at:Number(p.observed_at),confirmation:p.confirmation,acknowledge_erase:true,...(p.kind==='delete'?{partition:p.partition}:{filesystem:p.filesystem,acknowledge_raid:checked('acknowledge_raid')})},form);
+      progress(form,p.kind==='delete'?'Partition deleted. Refresh Storage to view the remaining layout.':'Disk reinitialized. Mount the new filesystem from Storage.');
+    } finally {
+      finishInitialization(form);
+      try{await refresh();}catch(e){toast('Refresh Storage before another disk action. '+e.message,true);}
+    }
+    return;
+  }
   if(type==='initialize') {
     if(form.dataset.initializationAttempted)return;
     form.dataset.initializationAttempted='true';
@@ -434,6 +529,7 @@ async function submit(form) {
   const direct={'storage-name':'storage.name',mount:'storage.mount',unmount:'storage.unmount',directory:'directory.create',rename:'directory.rename',permissions:'directory.access',share:'share.save','share-remove':'share.remove',backup:'backup.save',restore:'backup.restore','user-sync':'account.sync','user-state':'account.state',install:'system.install',firewall:'firewall.change',ban:'fail2ban.ban',jail:'fail2ban.configure',monitoring:'monitoring.save'};
   op=direct[type];
   if(['user-create','user-edit','user-password','password'].includes(type)) route={'user-create':'users.create','user-edit':'users.edit','user-password':'users.password',password:'password'}[type];
+  if(type==='disable-auto-mount'){await completedAction('storage.disable_auto_mount',{uuid:p.uuid},form);await refresh();closeDialog(true);toast('Automatic mount disabled.');return;}
   if(type==='storage-name'){await completedAction('storage.name',p,form);await refresh();closeDialog(true);return;}
   ['id','directory_id','source_id','retention','bantime','findtime','maxretry'].forEach(k=>{if(k in args)args[k]=Number(args[k]);});
   if(type==='mount'){args.persistent=checked('persistent');args.read_only=checked('read_only');args.allow_linux_permissions=checked('allow_linux_permissions');}
@@ -518,6 +614,10 @@ $('#dialog').addEventListener('cancel',event=>{if($('#dialog form')?.dataset.bus
 $('#dialog').addEventListener('click',e=>{if(e.target===$('#dialog'))closeDialog();});
 $('#dialog').addEventListener('close',()=>{if(!$('#dialog').open)$('#dialog-content').replaceChildren();});
 for(const type of ['pointerdown','keydown','wheel'])document.addEventListener(type,recordActivity,{passive:true});
+document.addEventListener('change',event=>{
+  if(event.target.name==='rescue'&&$('[data-clone-mode]'))$('[data-clone-mode]').textContent=event.target.checked?'SLOWER RESCUE CLONE: GNU ddrescue with trimming, scraping and up to three retry passes.':'Fast clone: GNU ddrescue without trimming, scraping or retry passes.';
+});
+setInterval(()=>{if(isAdmin()&&['advanced-disks','storage'].includes(page)&&activeClones().length)refresh().catch(e=>toast(e.message,true));},3000);
 let readingJob=false;
 setInterval(async()=>{const detail=$('#job-detail');if(!readingJob&&$('#dialog').open&&detail&&['queued','running'].includes(detail.dataset.status)){readingJob=true;try{const j=await api('action',{operation:'job.read',params:{id:detail.dataset.job}});if(detail.isConnected){detail.innerHTML=jobDetail(j);detail.dataset.status=j.status;}}catch(e){toast(e.message,true);}finally{readingJob=false;}}},2000);
 (async()=>{try{const r=await api('me');if(r.user)await enter(r.user);else await loginView();}catch(e){$('#app').innerHTML=`<main class="starting"><h1>Unable to connect</h1><p>${esc(e.message)}</p><p>Check installation and reload this page.</p></main>`;}})();
