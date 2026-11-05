@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 — 2026-10-31
+## 0.2.0 — 2026-11-05
 
 - Wait for NAS catalogue confirmation after a completed client upload instead of
   starting another full send during the polling gap. Remove silent full fallback
