@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Admin-only whole-disk clones; no arbitrary paths or command arguments."""
+from collections import deque
 import contextlib
 import fcntl
 import hashlib
@@ -17,6 +18,58 @@ import time
 from .core import Error, boolean, integer, keys, require
 from .erase import Eraser, active_swap_paths, md_members
 from .initialize import identity, fingerprint, pinned_disk
+
+
+class LiveOutput:
+    """A bounded tail of complete logical lines, including CR status updates."""
+    def __init__(self,limit=8192):
+        self.limit=limit;self.lines=deque();self.size=0;self.pending='';self.discard=False;self.after_cr=False
+
+    def complete(self):
+        if not self.discard:
+            line=self.pending+'\n'
+            self.lines.append(line);self.size+=len(line)
+            while self.size>self.limit and self.lines:self.size-=len(self.lines.popleft())
+        self.pending='';self.discard=False
+
+    def feed(self,text,final=False):
+        for char in text:
+            if char=='\n' and self.after_cr:
+                self.after_cr=False;continue
+            self.after_cr=char=='\r'
+            if char in '\r\n':self.complete()
+            elif not self.discard:
+                self.pending+=char
+                if len(self.pending)>=self.limit:self.pending='';self.discard=True
+        if final and (self.pending or self.discard):self.complete()
+        return ''.join(self.lines)
+
+
+class CloneCancelled(Error):
+    def __init__(self,report):
+        super().__init__('Clone cancelled before copying started; no clone writes were started.' if report.get('cancelled_before_start') else 'Clone interrupted by administrator. The destination may be incomplete; recovery map and progress are retained.')
+        self.report=report
+
+
+def cancel_clone(db,p,actor):
+    keys(p,('id','acknowledge_interrupt'))
+    require(isinstance(p['id'],str) and re.fullmatch('[a-f0-9]{32}',p['id']),'Invalid clone job identifier')
+    require(boolean(p['acknowledge_interrupt']),'Acknowledge that the destination may be incomplete')
+    rows=db.query("SELECT operation,status FROM jobs WHERE id=%s",(p['id'],))
+    require(bool(rows) and rows[0]['operation']=='storage.clone','Select a disk clone or recovery job')
+    require(rows[0]['status'] in ('queued','running'),'This clone has already finished')
+    # This request must bypass the worker/storage lock held by the clone.
+    # The owning worker observes a durable flag and signals only its own child.
+    db.set_setting('clone_cancel_'+p['id'],True)
+    if rows[0]['status']=='queued':
+        report={'state':'Interrupted','cancelled':True,'cancelled_before_start':True,
+                'note':'Cancelled while queued; no clone writes were started.'}
+        db.execute("UPDATE jobs SET status='failed',result=%s,error=%s,ended_at=UTC_TIMESTAMP() WHERE id=%s AND status='queued'",
+                   (json.dumps(report),str(CloneCancelled(report)),p['id']))
+        current=db.query('SELECT status,result FROM jobs WHERE id=%s',(p['id'],))
+        if current and current[0]['status']=='failed' and json.loads(current[0]['result'] or '{}').get('cancelled') is True:db.event('job.cancelled','Queued clone '+p['id']+' cancelled by administrator','warning')
+    db.audit(actor,'storage.clone_cancel',{'id':p['id']})
+    return {'state':'Cancellation requested','id':p['id']}
 
 
 def members(disk, nodes):
@@ -113,7 +166,13 @@ class Clones:
     def publish(self,report):
         self.db.execute('UPDATE jobs SET result=%s WHERE id=%s',(json.dumps(report),self.run.job_id))
 
+    def cancelled(self):
+        return self.db.setting('clone_cancel_'+str(self.run.job_id),False) is True
+
     def execute(self,p):
+        if self.cancelled():
+            raise CloneCancelled({'state':'Interrupted','cancelled':True,'cancelled_before_start':True,
+                                  'note':'Cancelled before clone device access; no clone writes were started.'})
         keys(p,('source','destination','rescue','observed_at','fingerprint','confirmation','acknowledge_erase','acknowledge_live'))
         rescue=boolean(p['rescue']);require(boolean(p['acknowledge_erase']),'Acknowledge destination data loss')
         live_ack=boolean(p['acknowledge_live']);integer(p['observed_at'])
@@ -151,11 +210,18 @@ class Clones:
                 verify_source();verify_target()
                 current_source,current_target,current_nodes=self.context(p)
                 require(pair_fingerprint(current_source,current_target,current_nodes)==p['fingerprint'],'Disk layout changed before cloning')
+                if self.cancelled():
+                    report.update(cancelled_before_start=True,note='Cancelled before the copy process was launched; no clone writes were started.')
+                    raise CloneCancelled(report)
                 report.update(state='Cloning',started_at=int(time.time()));self.publish(report)
                 # Pass pinned descriptors, never re-open a user-supplied path.
                 command=clone_command('/proc/self/fd/'+str(source_fd),'/proc/self/fd/'+str(target_fd),mapfile,source['size'],source['log-sec'],rescue)
                 self.run.log('GNU ddrescue '+('rescue mode, up to 3 retry passes' if rescue else 'fast mode, no trimming/scraping/retries')+'\n'+report['warning']+'\n')
                 code=self.copy(command,(source_fd,target_fd),mapfile,report,verify_source,verify_target)
+                if report.get('cancelled'):
+                    try:os.fsync(target_fd)
+                    except OSError as exc:report['sync_error']=str(exc)
+                    raise CloneCancelled(report)
                 os.fsync(target_fd);verify_source();verify_target()
                 report['exit_code']=code
                 require(code==0 and report.get('remaining_bytes')==0 and not report.get('progress_note'),'Clone incomplete: unreadable or uncopied areas remain, or ddrescue failed. Inspect the report and mapfile; no automatic retry.')
@@ -169,6 +235,10 @@ class Clones:
             report.update(state='Completed',ended_at=int(time.time()));self.publish(report)
             self.run.log('Clone completed. '+json.dumps(report)+'\n')
             return report
+        except CloneCancelled:
+            report.update(state='Interrupted',cancelled=True,ended_at=int(time.time()))
+            self.publish(report);self.run.log('Clone interrupted by administrator. Recovery map retained.\n')
+            raise CloneCancelled(report)
         except Exception as exc:
             report.update(state='Failed',error=str(exc),ended_at=int(time.time()));self.publish(report)
             self.run.log('Clone failed. '+json.dumps(report)+'\n')
@@ -177,16 +247,29 @@ class Clones:
     def copy(self,command,fds,mapfile,report,*verifiers):
         process=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
                                  pass_fds=fds,start_new_session=True,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'})
+        stop_started=None;stop_stage=0;live_output=LiveOutput()
         try:
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout,selectors.EVENT_READ)
                 while True:
+                    if process.poll() is None and self.cancelled():
+                        if stop_started is None:
+                            stop_started=time.monotonic()
+                            report.update(state='Stopping',cancel_requested_at=int(time.time()))
+                            self.run.log('Administrator requested cancellation; interrupting ddrescue and waiting for its recovery map.\n')
+                        elapsed=time.monotonic()-stop_started
+                        stage=3 if elapsed>=60 else 2 if elapsed>=30 else 1
+                        if stage>stop_stage:
+                            try:os.killpg(process.pid,{1:signal.SIGINT,2:signal.SIGTERM,3:signal.SIGKILL}[stage])
+                            except ProcessLookupError:pass
+                            stop_stage=stage
+                            report['stop_note']='Waiting for ddrescue to exit. Disks stay reserved until the process has stopped.'
                     for key,_ in selector.select(timeout=2):
                         output=os.read(key.fd,16384)
                         if output:
                             text=re.sub(r'\x1b\[[0-9;]*[A-Za-z]','',output.decode(errors='replace'))
                             self.run.log(text)
-                            report['output_tail']=(report.get('output_tail','')+text)[-8192:]
+                            report['output_tail']=live_output.feed(text)
                         else:selector.unregister(key.fileobj)
                     for verify in verifiers:verify()
                     try:
@@ -197,7 +280,11 @@ class Clones:
                         report['progress_note']='Waiting for a complete rescue map: '+str(exc)
                     report['updated_at']=int(time.time());self.publish(report)
                     if process.poll() is not None and not selector.get_map():break
-            return process.wait()
+            report['output_tail']=live_output.feed('',final=True)
+            self.publish(report)
+            code=process.wait()
+            if stop_started is not None:report.update(cancelled=True,exit_code=code)
+            return code
         finally:
             if process.poll() is None:
                 os.killpg(process.pid,signal.SIGTERM)

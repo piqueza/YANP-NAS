@@ -14,7 +14,7 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
-from agent.clones import Clones, candidate_reason, system_disks, clone_command, map_progress
+from agent.clones import Clones, LiveOutput, CloneCancelled, cancel_clone, candidate_reason, system_disks, clone_command, map_progress
 from agent.core import Error
 from agent.main import Agent
 
@@ -33,7 +33,7 @@ class CloneTests(unittest.TestCase):
     def setUp(self):
         self.nodes=fixture();self.source,self.target=self.nodes[:2]
         self.devices=Mock();self.devices.scan.return_value={'devices':self.nodes}
-        self.db=Mock();self.db.query.return_value=[]
+        self.db=Mock();self.db.setting.return_value={};self.db.query.return_value=[]
         self.runner=Mock(job_id='a'*32)
         self.clones=Clones({},self.devices,self.db,self.runner)
         self.choice={'source':self.source['stable_id'],'destination':self.target['stable_id'],'rescue':False}
@@ -142,6 +142,49 @@ class CloneTests(unittest.TestCase):
                 self.assertTrue(self.runner.log.called)
                 self.assertEqual(Path(self.source['stable_id']).read_bytes(),b'fixture data')
 
+    def test_cancel_request_is_immediate_validated_and_cannot_select_other_operations(self):
+        self.db.query.return_value=[{'operation':'storage.clone','status':'running'}]
+        p={'id':'a'*32,'acknowledge_interrupt':True}
+        self.assertEqual(cancel_clone(self.db,p,1)['state'],'Cancellation requested')
+        self.db.set_setting.assert_called_once_with('clone_cancel_'+'a'*32,True)
+        for changes in ({'id':'123'},{'acknowledge_interrupt':False},{'acknowledge_interrupt':'true'},{'signal':9}):
+            with self.assertRaises(Error):cancel_clone(self.db,{**p,**changes},1)
+        for operation,status in [('backup.run','running'),('storage.clone','completed'),('storage.clone','failed')]:
+            self.db.query.return_value=[{'operation':operation,'status':status}]
+            with self.assertRaises(Error):cancel_clone(self.db,p,1)
+
+    def test_queued_cancel_marks_the_job_terminal_without_waiting_for_worker(self):
+        self.db.query.side_effect=[[{'operation':'storage.clone','status':'queued'}],[{'status':'failed','result':json.dumps({'cancelled':True})}]]
+        cancel_clone(self.db,{'id':'a'*32,'acknowledge_interrupt':True},1)
+        sql,params=self.db.execute.call_args.args
+        self.assertIn("AND status='queued'",sql)
+        self.assertEqual(json.loads(params[0])['state'],'Interrupted')
+        self.assertTrue(json.loads(params[0])['cancelled_before_start'])
+
+    def test_queued_clone_cancellation_never_opens_devices(self):
+        self.db.setting.return_value=True
+        with patch('agent.clones.os.open') as opened:
+            with self.assertRaises(CloneCancelled) as cancelled:self.clones.execute({})
+            opened.assert_not_called()
+        self.assertTrue(cancelled.exception.report['cancelled_before_start'])
+
+    def test_live_output_keeps_whole_lines_and_holds_split_input_until_complete(self):
+        output=LiveOutput(limit=50)
+        self.assertEqual(output.feed('remaining ti'),'')
+        self.assertEqual(output.feed('me: 2h 50m\r'),'remaining time: 2h 50m\n')
+        self.assertEqual(output.feed('\nnext line'),'remaining time: 2h 50m\n')
+        self.assertEqual(output.feed('',final=True),'remaining time: 2h 50m\nnext line\n')
+        for n in range(20):text=output.feed(f'whole line {n}\n')
+        self.assertLessEqual(len(text),50)
+        self.assertTrue(all(line.startswith('whole line ') for line in text.splitlines()))
+        self.assertTrue(text.endswith('whole line 19\n'))
+
+    def test_live_output_discards_oversized_lines_without_leaking_fragments(self):
+        output=LiveOutput(limit=16)
+        self.assertEqual(output.feed('x'*100),'')
+        self.assertEqual(output.feed('tail of long line\nOK\n'),'OK\n')
+        self.assertEqual(output.pending,'')
+
     def test_fast_and_rescue_have_distinct_fixed_argv_and_no_shell(self):
         fast=clone_command('SOURCE','DESTINATION','MAP',1024,512,False)
         rescue=clone_command('SOURCE','DESTINATION','MAP',1024,512,True)
@@ -159,7 +202,7 @@ class CloneTests(unittest.TestCase):
 
     def test_clone_operations_are_admin_only_and_only_one_clone_can_be_queued(self):
         agent=Agent.__new__(Agent);agent.db=Mock();agent.db.query.return_value=[{'id':2,'enabled':1,'role':'user'}]
-        for operation in ('storage.clone','storage.clone_plan'):
+        for operation in ('storage.clone','storage.clone_plan','storage.clone_cancel'):
             with self.assertRaisesRegex(Error,'Administrator'):agent.authorize(operation,2,{})
         agent.db.query.return_value=[{'id':'existing-job'}]
         with self.assertRaisesRegex(Error,'already queued'):agent.enqueue('storage.clone',1,self.choice)
@@ -167,6 +210,23 @@ class CloneTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('ddrescue'),'Native GNU ddrescue required')
 class NativeCloneTests(unittest.TestCase):
+    def test_native_cancel_sends_interrupt_and_retains_final_map_and_source_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp);source=folder/'source.img';target=folder/'target.img';mapfile=folder/'cancel.map'
+            data=bytes(range(256))*1024;source.write_bytes(data);target.write_bytes(b'Z'*len(data))
+            stop=threading.Event();db=Mock();db.setting.side_effect=lambda *args:stop.is_set()
+            clone=Clones({},Mock(),db,Mock(job_id='a'*32));report={'total_bytes':len(data)}
+            command=clone_command(str(source),str(target),mapfile,len(data),512,True)
+            command.insert(1,'--max-read-rate=1Ki')  # test-only rate cap on disposable regular files
+            timer=threading.Timer(.2,stop.set);timer.start()
+            try:code=clone.copy(command,(),mapfile,report,lambda:None)
+            finally:timer.cancel();timer.join()
+            self.assertNotEqual(code,0);self.assertTrue(report['cancelled'])
+            self.assertTrue(mapfile.exists());self.assertGreater(report['remaining_bytes'],0)
+            self.assertEqual(source.read_bytes(),data)
+            self.assertEqual(report['state'],'Stopping')
+            self.assertTrue(any('interrupting ddrescue' in call.args[0] for call in clone.run.log.call_args_list))
+
     def test_native_simulated_read_errors_leave_incomplete_progress_even_with_zero_exit(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp);source=folder/'source.img';target=folder/'target.img';domain=folder/'bad.map';mapfile=folder/'result.map'

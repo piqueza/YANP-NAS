@@ -34,7 +34,7 @@ MAX_BYTES=64*1024**2
 
 
 def setting_allowed(name):
-    return name in ('monitoring','storage_names') or re.fullmatch(r'backup_options_[1-9][0-9]*',name) is not None
+    return name in ('monitoring','storage_names','snapshot_server') or re.fullmatch(r'backup_options_[1-9][0-9]*',name) is not None
 
 
 def snapshot(db):
@@ -69,6 +69,17 @@ def snapshot(db):
         group=grp.getgrgid(account.pw_gid)
         require(group.gr_name==user['username'] and account.pw_gid>=1000,'File account group cannot be safely migrated')
         accounts.append({'name':user['username'],'uid':account.pw_uid,'gid':account.pw_gid})
+    receiver_rows=[]
+    for setting in settings:
+        if setting['name']=='snapshot_server':receiver_rows=json.loads(setting['value']).get('receivers',[])
+    from .snapshot_config import validate_record
+    from .snapshot_server import SHELL
+    for row in receiver_rows:
+        validate_record(row)
+        if 'uid' not in row:continue
+        account=pwd.getpwnam(row['account']);group=grp.getgrgid(row['gid'])
+        require(account.pw_uid==row['uid'] and account.pw_gid==row['gid'] and account.pw_gecos=='YANP snapshot receiver' and account.pw_shell==SHELL and group.gr_name==row['account'],'Snapshot receiver Linux identity changed; reconcile before exporting')
+        accounts.append({'name':row['account'],'uid':row['uid'],'gid':row['gid']})
     return {'format':FORMAT,'created_at':int(time.time()),'source_host':socket.gethostname(),
             'schema_versions':versions,'auto_increment':counters,'tables':tables,'settings':settings,'linux_accounts':accounts,
             'samba_passwords_included':True}
@@ -157,6 +168,9 @@ class Migration:
         require(p['acknowledge_sensitive'] is True,'Acknowledge that this package contains web and Samba password-equivalent credentials')
         require(isinstance(self.run.job_id,str) and re.fullmatch('[a-f0-9]{32}',self.run.job_id),'A persistent export job is required')
         data=snapshot(self.db);samba=samba_snapshot(data)
+        from .snapshot_control import ClientControl
+        managed=ClientControl(self.config,self.db,None).migration_records()
+        if managed:data['managed_clients']=managed
         data['version']=(Path(__file__).resolve().parents[1]/'VERSION').read_text().strip()
         def dates(value):
             if isinstance(value,(dt.date,dt.datetime)):return value.strftime('%Y-%m-%d %H:%M:%S')
@@ -184,6 +198,8 @@ main(default_state=Path(__file__).resolve().with_name('state.json'))
                 'source_samba_workgroup':private_command(['testparm','-s','--parameter-name=workgroup']).strip(),
                 'source_firewall_preferences':self.db.setting('firewall',{}),
                 'required_existing_linux_accounts':data['linux_accounts'],
+                'managed_client_reconnection':'Managed client policy and credential bindings are preserved with SSH receivers disabled. Review disks/accounts and re-enable receiver access. Update each client’s root-only NAS address, TLS certificate pin and known_hosts after independently verifying the replacement host. Pending enrollments must be recreated and queued commands never resume.',
+                'snapshot_receiver_preparation':{'shell':'/usr/local/libexec/yanp-snapshot-shell','comment':'YANP snapshot receiver','supplementary_group':'yanp-snapshot','note':'Receiver accounts must already exist with these UID/GID identities. Restore preserves definitions disabled; mount the dedicated filesystem and enable access through the UI.'},
                 'automatic_mounts_to_review':[r for r in data['tables']['volumes'] if r['persistent']],
                 'backup_schedules_to_reenable':[r['id'] for r in data['tables']['backups'] if r['enabled']]}
         instructions='''YANP Nas system-state migration installer

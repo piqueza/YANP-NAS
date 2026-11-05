@@ -15,7 +15,7 @@ from scripts.check_publication import inspect_files
 ROOT = Path(__file__).resolve().parents[1]
 DIRECTORIES = ('agent', 'web', 'migrations', 'scripts', 'deploy', 'docs', 'tests', '.github')
 FILES = ('README.md', 'LICENSE', 'VERSION', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md', '.gitignore', '.gitattributes')
-EXTENSIONS = {'.py', '.sh', '.php', '.js', '.css', '.sql', '.md', '.conf', '.service', '.yml', '.yaml'}
+EXTENSIONS = {'.py', '.sh', '.php', '.js', '.css', '.sql', '.md', '.conf', '.service', '.yml', '.yaml', '.svg', '.ico'}
 FORBIDDEN = {'web.json', 'agent.json', 'setup-token', '.env', 'config.json'}
 
 

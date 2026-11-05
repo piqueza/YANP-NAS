@@ -38,7 +38,7 @@ class EraseTests(unittest.TestCase):
     def setUp(self):
         self.disk,self.parts,self.table=fixture();self.nodes=[self.disk,*self.parts]
         self.devices=Mock();self.devices.scan.return_value={'devices':self.nodes}
-        self.db=Mock();self.db.query.return_value=[]
+        self.db=Mock();self.db.setting.return_value={};self.db.query.return_value=[]
         self.erased=set();self.run=Mock(job_id='test-job');self.run.run.side_effect=self.command
         self.eraser=Eraser(self.devices,self.db,self.run);self.eraser.initializer.tools=Mock()
         self.eraser.table_entry=Mock(side_effect=lambda d,t,p:next(e for e in t['partitions'] if e['node']==p['path']))
@@ -67,6 +67,71 @@ class EraseTests(unittest.TestCase):
 
     def writes(self):
         return [c.args[0] for c in self.run.run.call_args_list if '--all' in c.args[0] or '--delete' in c.args[0]]
+
+    def test_replacement_partition_removes_only_known_residual_filesystem_signatures(self):
+        part=self.parts[0];path='/dev/disk/by-partuuid/new-test';verify=Mock()
+        self.eraser.live_device_check=Mock()
+        self.run.run.side_effect=[json.dumps({'signatures':[{'type':'btrfs','uuid':'OLD-BTRFS'}]}),'',json.dumps({'signatures':[]})]
+        self.eraser.prepare_replacement_partition(self.disk,part,path,verify)
+        self.assertIn(['wipefs','--all','--lock=nonblock',path],[c.args[0] for c in self.run.run.call_args_list])
+        self.assertEqual(self.eraser.live_device_check.call_count,2);self.assertGreaterEqual(verify.call_count,3)
+
+    def test_replacement_partition_refuses_hidden_raid_crypto_tables_and_managed_data(self):
+        self.eraser.live_device_check=Mock()
+        for kind in ('linux_raid_member','crypto_LUKS','gpt','dos','unknown'):
+            self.run.run.reset_mock();self.run.run.side_effect=lambda *a,**kw:json.dumps({'signatures':[{'type':kind}]})
+            with self.subTest(kind=kind),self.assertRaisesRegex(Error,'unsupported signatures'):
+                self.eraser.prepare_replacement_partition(self.disk,self.parts[0],'/dev/test-new',Mock())
+            self.assertFalse(self.writes())
+        self.run.run.reset_mock();self.run.run.side_effect=lambda *a,**kw:json.dumps({'signatures':[{'type':'ext4','uuid':'REFERENCED'}]})
+        self.db.query.side_effect=lambda sql,args: [{'id':1}] if args[0]=='REFERENCED' else []
+        with self.assertRaisesRegex(Error,'managed directories'):
+            self.eraser.prepare_replacement_partition(self.disk,self.parts[0],'/dev/test-new',Mock())
+        self.assertFalse(self.writes())
+
+    def test_replacement_partition_aborts_if_device_becomes_busy_or_wipe_is_incomplete(self):
+        self.eraser.live_device_check=Mock(side_effect=Error('mounted before write'))
+        with self.assertRaisesRegex(Error,'mounted'):
+            self.eraser.prepare_replacement_partition(self.disk,self.parts[0],'/dev/test-new',Mock())
+        self.run.run.assert_not_called()
+        self.eraser.live_device_check=Mock()
+        self.run.run.side_effect=lambda *a,**kw:json.dumps({'signatures':[{'type':'ext4'}]})
+        with self.assertRaisesRegex(Error,'signatures remain'):
+            self.eraser.prepare_replacement_partition(self.disk,self.parts[0],'/dev/test-new',Mock())
+
+    @unittest.skipUnless(all(shutil.which(c) for c in ('sfdisk','mkfs.ext4','mkfs.btrfs','wipefs','blkid')),'Native filesystem tools required')
+    def test_native_deleted_partition_retains_payload_then_confirmed_prepare_allows_btrfs(self):
+        from agent.core import Runner
+        from agent.initialize import partition_script,format_command
+        import uuid
+        with tempfile.TemporaryDirectory() as folder:
+            disk=Path(folder)/'disposable-disk.img';payload=Path(folder)/'disposable-partition.img'
+            with disk.open('xb') as f:f.truncate(256*1024**2)
+            with payload.open('xb') as f:f.truncate(128*1024**2)
+            subprocess.run(['mkfs.ext4','-q',str(payload)],check=True,capture_output=True)
+            script=partition_script(str(uuid.uuid4()),str(uuid.uuid4()))
+            subprocess.run(['sfdisk','--wipe','never','--wipe-partitions','never',str(disk)],input=script,text=True,check=True,capture_output=True)
+            table=json.loads(subprocess.run(['sfdisk','--json',str(disk)],capture_output=True,text=True,check=True).stdout)['partitiontable']
+            offset=table['partitions'][0]['start']*512
+            with disk.open('r+b') as target,payload.open('rb') as source:
+                target.seek(offset);shutil.copyfileobj(source,target)
+            subprocess.run(['sfdisk','--delete',str(disk),'1'],check=True,capture_output=True)
+            # A whole-disk probe no longer shows the deleted filesystem, while
+            # probing its former offset still finds it, just like a new partition.
+            whole=probe_signatures(Runner(),str(disk))
+            self.assertTrue(all(s['type'] in ('gpt','PMBR') for s in whole))
+            hidden=subprocess.run(['blkid','--probe','--offset',str(offset),'--output','export',str(disk)],capture_output=True,text=True,check=True).stdout
+            self.assertIn('TYPE=ext4',hidden)
+            # Exercise actual signature removal on the disposable partition image;
+            # only hardware identity/in-use checks are mocked for regular files.
+            self.eraser.run=Runner();self.eraser.live_device_check=Mock();self.eraser.references=Mock()
+            self.eraser.prepare_replacement_partition(self.disk,self.parts[0],str(payload),Mock())
+            Initializer=__import__('agent.initialize',fromlist=['Initializer']).Initializer
+            Initializer(Mock(),Runner()).blank(str(payload))
+            result=subprocess.run(format_command('btrfs',str(payload),str(uuid.uuid4()),512),capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            final=subprocess.run(['blkid','--probe','--output','export',str(payload)],capture_output=True,text=True,check=True).stdout
+            self.assertIn('TYPE=btrfs',final);self.assertIn('LABEL=YANP_DATA',final)
 
     def test_plans_name_exact_device_and_include_affected_partitions(self):
         plan=self.eraser.plan({'stable_id':self.disk['stable_id']})
@@ -285,12 +350,59 @@ class EraseTests(unittest.TestCase):
         with self.assertRaisesRegex(Error,'layout changed'):self.eraser.execute(params)
         self.assertEqual(self.writes(),[])
 
-    def test_unsupported_signatures_and_duplicate_uuids_are_refused(self):
+    def test_unsupported_signatures_refused_and_duplicates_require_whole_disk_confirmation(self):
         self.run.run.side_effect=lambda args,**kw:json.dumps({'partitiontable':self.table}) if args[0]=='sfdisk' else json.dumps({'signatures':[{'type':'unrecognized_vendor_raid_member'}]})
         with self.assertRaisesRegex(Error,'signatures'):self.params()
         self.run.run.side_effect=self.command;self.parts[1]['uuid']=self.parts[0]['uuid']
-        with self.assertRaisesRegex(Error,'duplicate'):self.params()
+        self.assertTrue(self.eraser.plan({'stable_id':self.disk['stable_id']})['requires_duplicate_confirmation'])
+        with self.assertRaisesRegex(Error,'duplicate'):self.eraser.execute(self.params())
+        with self.assertRaisesRegex(Error,'duplicate'):self.params(True)
         self.assertEqual(self.writes(),[])
+
+    def cloned_copy(self):
+        disk={**self.disk,'path':'/dev/sdy','stable_id':'test-other-disk','maj:min':'66:0','disk_sequence':'456'}
+        part={**self.parts[0],'path':'/dev/sdy1','physical_disks':['/dev/sdy'],'maj:min':'66:1'}
+        self.nodes.extend([disk,part]);return disk,part
+
+    def test_duplicate_override_requires_exact_device_even_with_format_confirmation(self):
+        self.cloned_copy();params=self.params()
+        for value in ('','/dev/sdy','/dev/sdz1',' /dev/sdz',True,None):
+            with self.subTest(value=value),self.assertRaises(Error):self.eraser.execute({**params,'duplicate_device':value})
+        self.assertFalse(self.writes())
+
+    def test_duplicate_confirmed_erase_never_writes_other_clone(self):
+        other,part=self.cloned_copy();params={**self.params(),'duplicate_device':self.disk['path']}
+        plan=self.eraser.plan({'stable_id':self.disk['stable_id']})
+        self.assertTrue(plan['requires_duplicate_confirmation'])
+        self.assertEqual({c['path'] for c in plan['duplicate_filesystems'][0]['copies']},{'/dev/sdz1','/dev/sdy1'})
+        self.eraser.initializer.initialize=Mock(return_value={'state':'Initialized'})
+        self.assertEqual(self.eraser.execute(params)['state'],'Reinitialized')
+        self.assertEqual([c[-1] for c in self.writes()],['/dev/sdz1','/dev/sdz2',self.disk['stable_id']])
+
+    def test_duplicate_peer_hardware_change_invalidates_preview_before_writes(self):
+        other,part=self.cloned_copy();params={**self.params(),'duplicate_device':self.disk['path']}
+        other['disk_sequence']='changed'
+        with self.assertRaisesRegex(Error,'layout changed'):self.eraser.execute(params)
+        self.assertFalse(self.writes())
+
+    def test_duplicate_confirmation_cannot_bypass_selected_mount_or_saved_allocations(self):
+        self.cloned_copy();params={**self.params(),'duplicate_device':self.disk['path']}
+        self.parts[0]['mountpoints']=['/mounted']
+        with self.assertRaisesRegex(Error,'Unmount'):self.eraser.execute(params)
+        self.parts[0]['mountpoints']=[];self.db.query.return_value=[{'id':1}]
+        with self.assertRaises(Error):self.eraser.execute(params)
+        self.assertFalse(self.writes())
+
+    def test_duplicate_btrfs_requires_inactive_proven_single_device_copies(self):
+        other,part=self.cloned_copy();part['fstype']=self.parts[0]['fstype']='btrfs'
+        original=self.command
+        self.run.run.side_effect=lambda args,**kw:'num_devices\t2\n' if args[0]=='btrfs' else original(args,**kw)
+        with self.assertRaisesRegex(Error,'Multi-device'):self.params()
+        self.run.run.side_effect=lambda args,**kw:'num_devices\t1\n' if args[0]=='btrfs' else original(args,**kw)
+        self.assertTrue(self.eraser.plan({'stable_id':self.disk['stable_id']})['requires_duplicate_confirmation'])
+        part['mountpoints']=['/other-copy']
+        with self.assertRaisesRegex(Error,'Unmount every duplicate Btrfs'):self.params()
+        self.assertFalse(self.writes())
 
     def test_delete_preserves_other_entries_and_never_formats(self):
         params=self.params(True);other=copy.deepcopy(self.table['partitions'][1])
@@ -306,6 +418,7 @@ class EraseTests(unittest.TestCase):
         self.assertEqual([a[-1] for a in self.writes()],['/dev/sdz1','/dev/sdz2',self.disk['stable_id']])
         args=self.eraser.initializer.initialize.call_args.args[0]
         self.assertEqual(args['filesystem'],'ext4');self.assertEqual(args['confirmation'],'INITIALIZE TESTONLY')
+        self.assertEqual(self.eraser.initializer.initialize.call_args.kwargs['prepare_partition'],self.eraser.prepare_replacement_partition)
         self.assertFalse(any('--force' in a for a in self.writes()))
 
     def test_whole_dos_reinitialize_skips_extended_container_and_erases_logical_filesystem(self):

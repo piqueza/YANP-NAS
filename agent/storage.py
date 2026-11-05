@@ -146,6 +146,8 @@ class Storage:
 
     def unmount(self, p):
         keys(p, ("uuid",))
+        from .snapshot_config import unallocated
+        unallocated(self.db,p['uuid'])
         node, target = self.devices.volume(p["uuid"], mounted=True)
         require(not self.db.query("SELECT id FROM jobs WHERE status='running' AND operation IN ('backup.run','backup.restore')"),
                 "A backup or restore is running; wait before unmounting storage")
@@ -178,6 +180,8 @@ class Storage:
 
     def create(self, p):
         keys(p, ("uuid", "name"))
+        from .snapshot_config import unallocated
+        unallocated(self.db,p['uuid'])
         name = label(p["name"])
         _, root = self.devices.volume(p["uuid"], mounted=True, write=True)
         fd = open_directory(root)

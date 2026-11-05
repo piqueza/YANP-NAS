@@ -88,10 +88,10 @@ def deletion_candidate(part, disk, nodes):
                  and str(part.get('parttype') or '').lower().removeprefix('0x') not in EXTENDED)))
 
 
-def layout_fingerprint(disk, nodes, table, signatures=()):
+def layout_fingerprint(disk, nodes, table, signatures=(), duplicates=()):
     members = sorted([dict(partition_identity(n),fstype=n.get('fstype'),uuid=n.get('uuid'),number=n.get('partition_number'))
                       for n in nodes if n.get('type') == 'part' and disk['path'] in n.get('physical_disks', [])],key=lambda n:n['path'])
-    return hashlib.sha256(json.dumps([identity(disk),members,table,signatures],sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([identity(disk),members,table,signatures,duplicates],sort_keys=True).encode()).hexdigest()
 
 
 class Eraser:
@@ -99,6 +99,7 @@ class Eraser:
         self.devices,self.db,self.run = devices,db,runner
         self.initializer = Initializer(devices,runner)
         self.signatures = []
+        self.duplicates = []
 
     def signature_report(self, p):
         keys(p,('stable_id',))
@@ -142,9 +143,11 @@ class Eraser:
         require(not {os.path.realpath(n['path']) for n in members} & active_swap_paths(), 'Active swap appeared before writing; erasure stopped')
 
     def references(self, nodes):
+        from .snapshot_config import unallocated
         for node in nodes:
             uuid = node.get('uuid')
             if not uuid:continue
+            unallocated(self.db,uuid)
             blockers=[]
             if self.db.query('SELECT id FROM directories WHERE volume_uuid=%s LIMIT 1',(uuid,)):
                 blockers.append('managed directories')
@@ -209,7 +212,7 @@ class Eraser:
             require(deletion_candidate(selected,disk,nodes),'RAID membership requires whole-disk reclamation; otherwise select a GPT or non-extended DOS primary partition')
         for part in members:
             self.table_entry(disk,table,part)
-        inventory=[]
+        inventory=[];duplicate_inventory=[]
         for node in [disk,*members]:
             signatures=probe_signatures(self.run,node['stable_id'] if node is disk else node['path'])
             supported=reclaimable_signature if allow_raid else signature_supported
@@ -219,10 +222,28 @@ class Eraser:
             raid=any(s['type'].lower() in RECLAIM_RAID for s in signatures)
             if node.get('uuid'):
                 duplicates=[n for n in nodes if n.get('uuid') == node['uuid']]
-                require(len(duplicates) == 1 or (allow_raid and raid and all(n.get('fstype') in RECLAIM_RAID
-                        and n.get('holders') == [] and not n.get('protected') and not any(n.get('mountpoints') or []) for n in duplicates)),
-                        'Shared/duplicate filesystem UUIDs or active RAID members require local handling')
+                if len(duplicates)>1:
+                    if raid:
+                        require(allow_raid and all(n.get('fstype') in RECLAIM_RAID and n.get('holders') == []
+                                and not n.get('protected') and not any(n.get('mountpoints') or []) for n in duplicates),
+                                'Shared/duplicate filesystem UUIDs or active RAID members require local handling')
+                    else:
+                        require(allow_raid,'Shared/duplicate filesystem UUIDs: use whole-disk Erase and reinitialize with its additional device confirmation; individual partition deletion is refused')
+                        require(all(n.get('type') in ('disk','part') and n.get('fstype') in PLAIN-{'gpt','pmbr','dos'} for n in duplicates),
+                                'Shared UUIDs involving RAID, encryption or mappings require local handling')
+                        if any(n.get('fstype')=='btrfs' for n in duplicates):
+                            require(all(n.get('fstype')=='btrfs' and n.get('holders') == [] and not n.get('protected')
+                                    and not any(n.get('mountpoints') or []) for n in duplicates),
+                                    'Unmount every duplicate Btrfs copy before reclaiming a cloned disk')
+                            for copy in duplicates:
+                                report=self.run.run(['btrfs','inspect-internal','dump-super',copy['path']])
+                                require(re.search(r'(?m)^num_devices\s+1\s*$',report) is not None,
+                                        'Multi-device or unverifiable Btrfs filesystems cannot use cloned-disk confirmation')
+                        duplicate_inventory.append({'uuid':node['uuid'],'selected_partition':node['path'],
+                            'copies':sorted([{'path':n['path'],'maj:min':n.get('maj:min'),'fstype':n.get('fstype'),
+                                'disks':[identity(d) for d in nodes if d.get('type')=='disk' and (d['path']==n['path'] or d['path'] in n.get('physical_disks',[]))]} for n in duplicates],key=lambda n:n['path'])})
             inventory.extend({**entry,'path':node['path']} for entry in signatures)
+        self.duplicates=sorted(duplicate_inventory,key=lambda entry:json.dumps(entry,sort_keys=True))
         self.signatures=sorted(inventory,key=lambda entry:json.dumps(entry,sort_keys=True))
         return disk,nodes,table,selected
 
@@ -234,31 +255,61 @@ class Eraser:
             if part:verify_partition(disk,part,part['path'])
         return {'device':identity(disk),'partition':partition_identity(part) if part else None,
                 'partitions':[dict(partition_identity(n),fstype=n.get('fstype'),uuid=n.get('uuid')) for n in nodes if n.get('type') == 'part' and disk['path'] in n.get('physical_disks',[])],
-                'fingerprint':layout_fingerprint(disk,nodes,table,self.signatures),'observed_at':int(time.time()),
+                'fingerprint':layout_fingerprint(disk,nodes,table,self.signatures,self.duplicates),'observed_at':int(time.time()),
                 'confirmation':('DELETE '+part['path']) if part else 'FORMAT '+disk['path'],
                 'filesystems':list(FORMATTERS),'filesystem':'ext4',
                 'raid_signatures':[entry for entry in self.signatures if entry['type'].lower() in RECLAIM_RAID],
-                'requires_raid_ack':any(entry['type'].lower() in RECLAIM_RAID for entry in self.signatures)}
+                'requires_raid_ack':any(entry['type'].lower() in RECLAIM_RAID for entry in self.signatures),
+                'requires_duplicate_confirmation':bool(self.duplicates),'duplicate_filesystems':self.duplicates}
+
+    def confirm_duplicates(self,p,disk):
+        value=p.get('duplicate_device','')
+        require(isinstance(value,str),'Enter the exact disk device path')
+        require(not self.duplicates or value==disk['path'],
+                'Shared/duplicate filesystem UUIDs: possibly caused by a finished clone. Manually type the selected disk device path in the additional confirmation field')
+
+    def prepare_replacement_partition(self,disk,part,path,verify):
+        """Clear old filesystems exposed after recreating a deleted partition.
+
+        fdisk deletion does not erase the old payload. Only the whole-disk
+        FORMAT confirmation authorizes this path; ordinary initialization never
+        calls it. Newly discovered RAID/encryption/table signatures fail closed.
+        """
+        verify();self.live_device_check(disk);verify_partition(disk,part,path)
+        self.references([part])
+        signatures=probe_signatures(self.run,path)
+        allowed=PLAIN-{'gpt','pmbr','dos'}
+        require(all(s['type'].lower() in allowed for s in signatures),
+                'New partition exposes RAID, encryption, partition-table or unsupported signatures. No replacement-partition signatures were erased; inspect Storage signatures locally before retrying.')
+        self.references([{'path':path,'uuid':s.get('uuid')} for s in signatures])
+        if signatures:
+            self.run.log('Clearing residual filesystem signatures exposed by the replacement partition, as authorized by the whole-disk FORMAT confirmation.\n')
+            verify();self.live_device_check(disk);verify_partition(disk,part,path)
+            self.run.run(['wipefs','--all','--lock=nonblock',path],timeout=90)
+            require(not probe_signatures(self.run,path),'Replacement partition signatures remain; formatting refused')
+            verify()
 
     def execute(self, p, deleting=False):
         keys(p,('stable_id','fingerprint','observed_at','confirmation','acknowledge_erase','partition') if deleting else
-             ('stable_id','fingerprint','observed_at','confirmation','acknowledge_erase','filesystem'), () if deleting else ('acknowledge_raid',))
+             ('stable_id','fingerprint','observed_at','confirmation','acknowledge_erase','filesystem'), () if deleting else ('acknowledge_raid','duplicate_device'))
         require(boolean(p['acknowledge_erase']),'Acknowledge the loss of data on the selected device')
         integer(p['observed_at'])
         require(0 <= time.time()-p['observed_at'] <= 300,'Confirmation expired; reopen Storage and confirm again')
         fs=None if deleting else filesystem_choice(p['filesystem'])
         if deleting:require(isinstance(p['partition'],str) and bool(p['partition']) and len(p['partition'])<=256 and '\x00' not in p['partition'],'Select a partition path')
         disk,nodes,table,part=self.context(p['stable_id'],p['partition'] if deleting else None)
-        require(p['fingerprint'] == layout_fingerprint(disk,nodes,table,self.signatures),'Disk identity or partition layout changed; refresh and confirm again')
+        require(p['fingerprint'] == layout_fingerprint(disk,nodes,table,self.signatures,self.duplicates),'Disk identity or partition layout changed; refresh and confirm again')
         require(p['confirmation'] == ('DELETE '+part['path'] if deleting else 'FORMAT '+disk['path']), 'Type the exact device confirmation')
         if not deleting:
             acknowledged=boolean(p.get('acknowledge_raid',False))
             require(not any(entry['type'].lower() in RECLAIM_RAID for entry in self.signatures) or acknowledged,
                     'Explicitly acknowledge that this disk is no longer needed by its RAID array before reclaiming it')
+        if not deleting:self.confirm_duplicates(p,disk)
         if fs:self.initializer.tools(fs)
         with pinned_disk(disk) as verify:
             current,current_nodes,current_table,current_part=self.context(p['stable_id'],p['partition'] if deleting else None)
-            require(layout_fingerprint(current,current_nodes,current_table,self.signatures) == p['fingerprint'],'Device changed during final checks')
+            require(layout_fingerprint(current,current_nodes,current_table,self.signatures,self.duplicates) == p['fingerprint'],'Device changed during final checks')
+            if not deleting:self.confirm_duplicates(p,current)
             verify()
             try:
                 if deleting:
@@ -302,7 +353,7 @@ class Eraser:
                 verify()
                 result=self.initializer.initialize({'stable_id':p['stable_id'],'fingerprint':fingerprint(fresh),
                     'observed_at':int(time.time()),'confirmation':initialize_confirmation(fresh),
-                    'acknowledge_erase':True,'filesystem':fs})
+                    'acknowledge_erase':True,'filesystem':fs},prepare_partition=self.prepare_replacement_partition)
                 return dict(result,state='Reinitialized')
             except Exception as exc:
                 raise Error('Storage metadata may have changed and data may be lost. No rollback or automatic retry is attempted. Refresh Storage and inspect locally. '+str(exc)) from exc

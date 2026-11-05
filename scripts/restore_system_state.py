@@ -22,7 +22,7 @@ from scripts.reset_web_password import load_config
 
 
 def validate(data):
-    keys(data,('format','created_at','source_host','schema_versions','auto_increment','tables','settings','linux_accounts','samba_passwords_included','version','samba_sid','samba_accounts','samba_sha256'))
+    keys(data,('format','created_at','source_host','schema_versions','auto_increment','tables','settings','linux_accounts','samba_passwords_included','version','samba_sid','samba_accounts','samba_sha256'),('managed_clients',))
     require(data['format']==FORMAT and data['samba_passwords_included'] is True,'Unsupported migration format')
     require(isinstance(data['schema_versions'],list) and data['schema_versions'] and all(type(v)is int for v in data['schema_versions']),'Invalid schema versions')
     require(isinstance(data['samba_sid'],str) and re.fullmatch(r'S-1-5-21-[0-9]+-[0-9]+-[0-9]+',data['samba_sid']),'Invalid Samba SID')
@@ -56,18 +56,31 @@ def validate(data):
     users=tables['users'];require(any(u['role']=='admin' and u['enabled'] for u in users),'An enabled administrator is required')
     require(len({u['id'] for u in users})==len(users) and len({u['username'] for u in users})==len(users),'Duplicate user identity')
     require(isinstance(data['settings'],list) and len(data['settings'])<=10000,'Invalid settings')
+    receiver_rows=[]
     for row in data['settings']:
         keys(row,('name','value'));require(isinstance(row['name'],str) and setting_allowed(row['name']),'Unsupported setting')
-        require(isinstance(row['value'],str),'Invalid setting JSON');json.loads(row['value'])
-    require(isinstance(data['linux_accounts'],list) and len(data['linux_accounts'])<=len(users),'Invalid file accounts')
-    names={u['username'] for u in users};seen=set();uids=set();gids=set()
+        require(isinstance(row['value'],str),'Invalid setting JSON');decoded=json.loads(row['value'])
+        if row['name']=='snapshot_server':
+            from agent.snapshot_config import registry
+            receiver_rows=registry(decoded)['receivers']
+    require(isinstance(data['linux_accounts'],list) and len(data['linux_accounts'])<=len(users)+len(receiver_rows),'Invalid file accounts')
+    names={u['username'] for u in users}|{r['account'] for r in receiver_rows};seen=set();uids=set();gids=set()
     for account in data['linux_accounts']:
-        keys(account,('name','uid','gid'));username(account['name']);integer(account['uid'],1000,2**31-1);integer(account['gid'],1000,2**31-1)
+        keys(account,('name','uid','gid'))
+        from agent.snapshot_server import receiver_name
+        if account['name'].startswith('ynpsnap_'):receiver_name(account['name'])
+        else:username(account['name'])
+        integer(account['uid'],1000,2**31-1);integer(account['gid'],1000,2**31-1)
         require(account['name'] in names and account['name'] not in seen and account['uid'] not in uids and account['gid'] not in gids,'Duplicate or unassigned file account')
         seen.add(account['name']);uids.add(account['uid']);gids.add(account['gid'])
+    for row in receiver_rows:
+        require('uid' not in row or any(a['name']==row['account'] and a['uid']==row['uid'] and a['gid']==row['gid'] for a in data['linux_accounts']),'Missing snapshot receiver numeric identity')
     require(set(data['samba_accounts']) <= seen,'All Samba users need pre-existing Linux identities')
     require(set(data['samba_accounts']) <= {u['username'] for u in users},'Samba accounts must belong to migrated application users')
     require({u['username'] for u in users if u['system_synced']} <= set(data['samba_accounts']),'Missing synchronized Samba account')
+    if 'managed_clients' in data:
+        from agent.snapshot_control import validate_migration_records
+        validate_migration_records(data['managed_clients'],data['settings'])
     return data
 
 
@@ -103,6 +116,9 @@ def fresh_target(db,data):
         require(not db.query('SELECT * FROM '+table+' LIMIT 1'),'Target has existing NAS configuration; fresh installation required')
     require(not db.query("SELECT id FROM jobs WHERE status IN ('queued','running') LIMIT 1"),'Wait for all jobs before restoring')
     require(not db.query('SELECT uuid FROM volumes WHERE persistent=1 LIMIT 1'),'Remove target auto mounts first')
+    from agent.snapshot_config import receivers
+    from agent.snapshot_config import destinations
+    require(not destinations(db),'Target already has snapshot destinations; fresh installation required')
     account_preflight(data['linux_accounts'])
 
 
@@ -126,6 +142,11 @@ def import_rows(db,data):
             for row in tables[table]:
                 cursor.execute('INSERT INTO '+table+' ('+','.join(columns)+') VALUES ('+','.join(['%s']*len(columns))+')',tuple(row[c] for c in columns))
         for row in data['settings']:
+            row=copy.deepcopy(row)
+            if row['name']=='snapshot_server':
+                registry=json.loads(row['value'])
+                for receiver in registry['receivers']:receiver.update(enabled=False,state='Migrated - disabled')
+                row['value']=json.dumps(registry)
             cursor.execute('INSERT INTO settings(name,value) VALUES(%s,%s) ON DUPLICATE KEY UPDATE value=VALUES(value)',(row['name'],row['value']))
 
     # Preserve identities beyond MAX(id), including IDs of deleted definitions.
@@ -171,6 +192,11 @@ def restore(db,data,runner,samba_blob,config):
     imported={line.split(':',1)[0] for line in private_command(['pdbedit','--list']).splitlines() if line.strip()}
     require(imported==set(data['samba_accounts']),'Imported Samba account inventory differs; services remain stopped')
     import_rows(db,data)
+    if data.get('managed_clients'):
+        from agent.snapshot_control import ClientControl
+        control=ClientControl(config,db,None)
+        require(not control.summaries(),'Target already has client control records')
+        for client in data['managed_clients']:control.write(client['account'],client)
     from agent.samba import Samba
     from agent.core import atomic_write
     atomic_write(include,Samba(config,db,runner).render(),0o644)

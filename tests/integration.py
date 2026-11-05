@@ -281,6 +281,28 @@ def main():
         user.call('action',{'operation':'storage.signatures','params':{'stable_id':'not-a-device'}},expect=403)
         admin.call('action',{'operation':'storage.signatures','params':{'stable_id':'not-a-device'}},expect=422)
         passed('signature inspection is administrator-only and rejects unknown disks without changing storage')
+        for operation in ('snapshot.client_update','snapshot.client_create','snapshot.client_policy','snapshot.client_command','snapshot.client_remove','snapshot.client_installer','snapshot.client_view','snapshot.destination_create','snapshot.destination_remove','snapshot.candidates','snapshot.inspect','snapshot.create','snapshot.configure','snapshot.delete','snapshot.remove'):
+            user.call('action',{'operation':operation,'params':{}},expect=403)
+        assert 'snapshot_server' not in user.call('state')
+        admin.call('action',{'operation':'snapshot.inspect','params':{'account':'root'}},expect=422)
+        snapshot_job=admin.call('action',{'operation':'snapshot.create','params':{}})['job_id']
+        wait_until(lambda:admin.call('action',{'operation':'job.read','params':{'id':snapshot_job}})['status']=='failed')
+        assert admin.call('state')['snapshot_server']['client_installer_available'] is True
+        destination_job=admin.call('action',{'operation':'snapshot.destination_create','params':{}})['job_id']
+        wait_until(lambda:admin.call('action',{'operation':'job.read','params':{'id':destination_job}})['status']=='failed')
+        passed('Btrfs receiver operations and registry are admin-only and invalid creation fails without account or disk writes')
+        from agent.snapshot_control import ClientControl,digest
+        control=ClientControl(config,None,None);control_secret=secrets.token_hex(32)
+        account='ynpsnap_fixture'
+        control.write(account,{'account':account,'uuid':'TEST-DESTINATION','name':'Fixture client','status':'Uninitialised, please finish client installation','created_at':123,'last_seen':None,
+            'bootstrap_hash':digest(control_secret),'control_hash':digest(secrets.token_hex(32)),'expires_at':int(time.time())+3600,'inventory':[],'policies':{},'commands':[],'report':{}})
+        state_data=admin.call('state')['snapshot_server'];view=admin.call('action',{'operation':'snapshot.client_view','params':{'account':account}})
+        assert control_secret not in json.dumps([state_data,view]) and digest(control_secret) not in json.dumps([state_data,view])
+        assert view['status'].startswith('Uninitialised') and 'bootstrap_hash' not in view and 'control_hash' not in view
+        admin.call('action',{'operation':'snapshot.client_create','params':{'enrollment':control_secret}},expect=422)
+        control.path(account).unlink()
+        passed('managed client state/detail reads exclude enrollment/control credentials and generic jobs refuse credential-bearing client payloads')
+
         for operation in ('storage.clone_plan','storage.clone'):
             user.call('action',{'operation':operation,'params':{}},expect=403)
         admin.call('action',{'operation':'storage.clone_plan','params':{'source':'not-a-device','destination':'not-a-device','rescue':False}},expect=422)
@@ -290,6 +312,45 @@ def main():
         assert any(j['id']==clone_job and j['status']=='failed' for j in clone_state['clone_jobs'])
         assert 'clone_jobs' not in user.call('state')
         passed('disk cloning is administrator-only; invalid requests fail before disk access and reports stay private')
+        # A synthetic running clone proves cancellation bypasses the storage lock
+        # and cannot sit in the worker queue behind the process it must stop.
+        from agent.core import Locks
+        cancel_id=secrets.token_hex(16)
+        with connect(database='yanp_nas') as c,c.cursor() as cur:
+            cur.execute("INSERT INTO jobs(id,actor_id,operation,params,status) VALUES(%s,1,'storage.clone','{}','running')",(cancel_id,))
+        # Validate power submission against real DB state with a detached Agent
+        # queue: no worker can ever execute a power command, even on regression.
+        from agent.main import Agent as DetachedAgent
+        from agent.core import DB, Error
+        import queue,platform
+        detached=DetachedAgent.__new__(DetachedAgent);detached.config=config;detached.db=DB(config);detached.ready=queue.Queue()
+        for clone_status in ('queued','running'):
+            with connect(database='yanp_nas') as c,c.cursor() as cur:
+                cur.execute('UPDATE jobs SET status=%s WHERE id=%s',(clone_status,cancel_id))
+            for power_action in ('reboot','shutdown'):
+                try:detached.enqueue('system.'+power_action,1,{'confirmation':power_action.upper()+' '+platform.node(),'warnings_acknowledged':True})
+                except Error as exc:assert 'additional data-loss acknowledgement' in str(exc)
+                else:raise AssertionError('Power request bypassed clone acknowledgement')
+        assert detached.ready.empty()
+        passed('reboot/shutdown submission rejects missing clone acknowledgement for queued and running clones without inserting a job')
+        cancel_params={'id':cancel_id,'acknowledge_interrupt':True}
+        user.call('action',{'operation':'storage.clone_cancel','params':cancel_params},expect=403)
+        admin.call('action',{'operation':'storage.clone_cancel','params':{**cancel_params,'acknowledge_interrupt':False}},expect=422)
+        with Locks(str(folder/'locks')).hold('storage'):
+            assert admin.call('action',{'operation':'storage.clone_cancel','params':cancel_params})['state']=='Cancellation requested'
+        with connect(database='yanp_nas') as c,c.cursor() as cur:
+            cur.execute("SELECT value FROM settings WHERE name=%s",('clone_cancel_'+cancel_id,))
+            assert json.loads(cur.fetchone()[0]) is True
+            cur.execute("UPDATE jobs SET status='failed',result=%s,error='Synthetic interrupted clone',ended_at=UTC_TIMESTAMP() WHERE id=%s",(json.dumps({'state':'Interrupted','cancelled':True}),cancel_id))
+        admin.call('action',{'operation':'storage.clone_cancel','params':cancel_params},expect=422)
+        with Locks(str(folder/'locks')).hold('storage'):
+            waiting=admin.call('action',{'operation':'storage.clone','params':{}})['job_id']
+            admin.call('action',{'operation':'storage.clone_cancel','params':{'id':waiting,'acknowledge_interrupt':True}})
+            wait_until(lambda:admin.call('action',{'operation':'job.read','params':{'id':waiting}})['status']=='failed')
+            cancelled=admin.call('action',{'operation':'job.read','params':{'id':waiting}})
+            assert json.loads(cancelled['result'])['cancelled_before_start'] is True
+        passed('clone cancellation is admin-only, requires acknowledgement and bypasses the active storage lock without queueing')
+
         user.call('action',{'operation':'system.state_export','params':{'acknowledge_sensitive':True}},expect=403)
         state_job=admin.call('action',{'operation':'system.state_export','params':{'acknowledge_sensitive':False}})['job_id']
         wait_until(lambda:admin.call('action',{'operation':'job.read','params':{'id':state_job}})['status']=='failed')
@@ -404,6 +465,7 @@ def main():
         inactive=int(time.time())-120
         set_last_seen(inactive)
         admin.call('me');admin.call('state');admin.call('action',{'operation':'job.read','params':{'id':jobid}})
+        admin.call('action',{'operation':'snapshot.client_view','params':{'account':'ynpsnap_missing'}},expect=422)
         assert last_seen()==inactive,'Background reads renewed the inactivity timer'
         passed('background status/job polling cannot keep an idle session alive')
         admin.call('activity',{});assert last_seen()>inactive

@@ -1207,7 +1207,27 @@ input[readonly] {
   }
 }
 
-/* Advanced storage tools remain directly beneath Storage in navigation. */
-.sidebar nav a.subnav { padding-left: 1.6rem; font-size: .78rem; }
 
 .clone-progress { width: 100%; accent-color: var(--teal, #137e73); }
+
+.clone-controls { flex-wrap: wrap; }
+.clone-controls strong { flex: 1; min-width: 140px; }
+
+.snapshot-storage-grid {
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:25px;
+}
+.snapshot-storage-grid .row {flex-wrap:wrap;overflow-wrap:anywhere}
+.snapshot-storage-grid small {display:block;margin-top:5px;color:var(--muted)}
+.snapshot-summary-source {padding:0 23px 18px;overflow-wrap:anywhere}
+.snapshot-storage-grid h3 {padding:16px 23px 0}
+.snapshot-summary-source h3 {padding:0}
+@media(max-width:900px) {
+  .snapshot-storage-grid {grid-template-columns:minmax(0,1fr);gap:0}
+}
+
+.client-update-notice small {display:block;margin-top:5px;color:var(--muted)}
+.client-update-notice .form-error {color:var(--bad)}
+.client-update-notice .row {flex-wrap:wrap}
+.client-update-notice .grow {min-width:220px;overflow-wrap:anywhere}

@@ -7,6 +7,36 @@ import unittest
 
 @unittest.skipUnless(shutil.which('node'), 'Node is only needed for frontend checks')
 class DialogWorkflowTests(unittest.TestCase):
+    def test_client_update_notice_and_opt_in_form_never_offer_legacy_auto_install(self):
+        self.js(r"""
+context.FormData=class {constructor(form){return Object.entries(form.values);}};
+run(`user={role:'admin'};state={snapshot_server:{managed_clients:[{account:'ynpsnap_new',name:'New <laptop>',status:'Initialised',agent_sha256:'a'.repeat(64),available_sha256:'b'.repeat(64),updater:1,auto_update:false},{account:'ynpsnap_old',name:'Old laptop',status:'Initialised',updater:0,available_sha256:'b'.repeat(64)}]}};let html='',calls=[];dialog=(title,body)=>{html=body};action=async(op,p)=>calls.push({op,p});`);
+const notice=run('snapshotClientUpdates()');assert.match(notice,/2 clients need/);assert.match(notice,/New &lt;laptop&gt;/);assert.match(notice,/one-time manual/i);assert.match(notice,/snapshot-update-edit/);
+assert.ok(!notice.includes('data-account="ynpsnap_old"'));
+(async()=>{
+ await run("clickAction({dataset:{action:'snapshot-update-edit',account:'ynpsnap_new'}})");assert.match(run('html'),/current and future/);
+ context.form={dataset:{form:'snapshot-update'},values:{account:'ynpsnap_new'},elements:{enabled:{checked:true}}};await run('submit(form)');
+ assert.equal(run('calls[0].op'),'snapshot.client_update');assert.equal(run('calls[0].p.enabled'),true);
+ run("user={role:'user'}");assert.equal(run('snapshotClientUpdates()'),'');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+""")
+
+    def test_snapshot_size_warnings_distinguish_missing_zero_and_initial_copy_capacity(self):
+        self.js(r"""
+run(`let c={report:{sizes:{a:{status:'ready',bytes:120,observed_at:123},b:{status:'ready',bytes:0,observed_at:123}}},policies:{a:{enabled:true},b:{enabled:true}},received:{},destination_space:{status:'ready',total_bytes:1000,available_bytes:100,observed_at:123}};`);
+assert.match(run("snapshotSizeInfo(c,'a')"),/may not fit/);
+assert.match(run("snapshotSizeInfo(c,'b')"),/0 B/);
+assert.match(run("snapshotDestinationSpace(c)"),/Selected initial copies may not fit/);
+run("c.received.a={snapshots:[{name:'baseline'}]}");
+assert.ok(!run("snapshotSizeInfo(c,'a')").includes('may not fit'));
+assert.ok(!run("snapshotDestinationSpace(c)").includes('Selected initial copies may not fit'));
+assert.match(run("snapshotSizeInfo({report:{}},'a')"),/Update client agent/);
+assert.match(run("snapshotSizeInfo({report:{sizes:{a:{status:'calculating',bytes:null}}}},'a')"),/Calculating/);
+assert.match(run("snapshotSizeInfo({report:{sizes:{a:{status:'unavailable',bytes:null}}}},'a')"),/unavailable/);
+assert.match(run("snapshotDestinationSpace({})"),/space unavailable/);
+run("c.destination_space.read_only=true");assert.match(run("snapshotDestinationSpace(c)"),/read-only/);
+""")
+
     def js(self, code):
         harness=r'''
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
@@ -18,6 +48,90 @@ const run=code=>vm.runInContext(code,context);
 '''
         result=subprocess.run(['node','-e',harness+code],cwd=Path(__file__).resolve().parents[1],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_subvolume_labels_distinguish_linux_mounts_top_level_and_legacy_guesses(self):
+        self.js(r"""
+assert.equal(run("snapshotSourceDescription({id:256,path:'@',mountpoints:['/']}).title"),'System files (/)');
+assert.equal(run("snapshotSourceDescription({id:257,path:'@home',mountpoints:['/home']}).title"),'Personal files (/home)');
+assert.equal(run("snapshotSourceDescription({id:5,path:'/',mountpoints:[]}).title"),'Btrfs top level');
+assert.equal(run("snapshotSourceDescription({id:5,path:'/',mountpoints:['/']}).title"),'System files (/)');
+assert.equal(run("snapshotSourceDescription({id:256,path:'@',mountpoints:['/archive']}).title"),'Files at /archive');
+assert.match(run("snapshotSourceDescription({id:256,path:'@',mounted:true}).title"),/usually system files/);
+assert.match(run("snapshotSourceDescription({id:257,path:'@home',mounted:true}).description"),/not reported its mountpoints/);
+assert.ok(!run("snapshotSourceDescription({id:256,path:'@',mountpoints:[]}).title").includes('System files'));
+const html=run("snapshotSourceCell({id:5,path:'/',uuid:'TEST-UUID',mountpoints:[],mounted:false})");
+assert.match(html,/Btrfs top level/);assert.match(html,/does not include the files inside/);assert.match(html,/<details><summary>Technical details/);
+""")
+
+    def test_managed_clients_enroll_before_management_and_never_request_client_private_keys(self):
+        self.js(r"""
+context.FormData=class {constructor(form){return Object.entries(form.values);}};
+context.location.hostname='nas.example';
+run(`user={role:'admin'};state={devices:{devices:[]},jobs:[],snapshot_server:{destinations:[{uuid:'TEST-DEST',name:'Backup disk'}],managed_clients:[{account:'ynpsnap_pending',uuid:'TEST-DEST',name:'Pending laptop',status:'Uninitialised, please finish client installation'},{account:'ynpsnap_ready',uuid:'TEST-DEST',name:'Ready laptop',status:'Initialised'}],receivers:[]}};let html='',calls=[];dialog=(title,body)=>{html=body;};action=async(op,p)=>{calls.push({op,p});};closeDialog=()=>{};`);
+const pending=run('snapshotManagedCard(snapshotManaged()[0])');assert.match(pending,/Uninitialised/);assert.match(pending,/Download private installer/);assert.ok(!pending.includes('data-page="snapshot-client/ynpsnap_pending"'));
+const ready=run('snapshotManagedCard(snapshotManaged()[1])');assert.match(ready,/snapshot-client\/ynpsnap_ready/);assert.match(ready,/Manage client/);
+(async()=>{
+ await run("clickAction({dataset:{action:'snapshot-managed-create',uuid:'TEST-DEST'}})");
+ assert.match(run('html'),/https:\/\/nas.example:9444/);assert.ok(!run('html').includes('name="public_key"'));assert.ok(!run('html').includes('name="private_key"'));
+ context.form={dataset:{form:'snapshot-managed-create'},values:{uuid:'TEST-DEST',name:'Laptop',account:'ynpsnap_laptop',lan:'192.168.1.0/24',server_url:'https://nas.example:9444'},elements:{trusted_client:{checked:false}}};
+ await assert.rejects(run('submit(form)'),/trusted/);context.form.elements.trusted_client.checked=true;await run('submit(form)');
+ assert.equal(run('calls[0].op'),'snapshot.client_create');assert.equal(run('calls[0].p.trusted_client'),true);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+""")
+
+    def test_snapshot_server_navigation_creation_and_allocated_volume_filters(self):
+        self.js(r"""
+context.FormData=class {constructor(form){return Object.entries(form.values);}};
+run(`user={role:'admin'};state={system:{hostname:'test-nas'},devices:{devices:[]},volumes:[{uuid:'USED'},{uuid:'FREE'}],jobs:[],snapshot_server:{destinations:[{uuid:'USED',name:'Shared destination'},{uuid:'FREE',name:'Spare destination'}],devices:[{snapshot_candidate:'blank',stable_id:'test-disk',path:'/dev/sdz',size:1024},{snapshot_candidate:'btrfs',uuid:'FREE',path:'/dev/sdy1',size:2048}],receivers:[{account:'ynpsnap_laptop',uuid:'USED',name:'Laptop',lan:'192.168.1.0/24',fingerprint:'SHA256:test',enabled:true,subvolume_id:257}]}};let html='',calls=[];dialog=(title,body)=>{html=body;};action=async(op,p)=>{calls.push({op,p});};closeDialog=()=>{};`);
+const nav=run('nav');assert.equal(nav.findIndex(([k])=>k==='snapshot-server'),nav.findIndex(([k])=>k==='backups')+1);
+const page=run('snapshotServerPage()');assert.match(page,/Initialize as Btrfs/);assert.match(page,/Create destination on this volume/);assert.match(page,/disabled[^>]*>Client installer — coming later/);assert.match(page,/ssh -p 2222/);
+assert.ok(!JSON.stringify(run('optionsKnownVolumes()')).includes('USED'));
+(async()=>{
+ await run("clickAction({dataset:{action:'snapshot-destination-create',uuid:'FREE'}})");assert.match(run('html'),/Destination name/);assert.ok(!run('html').includes('name="account"'));assert.ok(!run('html').includes('name="public_key"'));
+ context.form={dataset:{form:'snapshot-destination-create'},values:{uuid:'FREE',name:'Backup disk'},elements:{}};await run('submit(form)');assert.equal(run('calls[0].op'),'snapshot.destination_create');assert.equal(Object.keys(run('calls[0].p')).sort().join(','),'name,uuid');run('calls=[]');
+ await run("clickAction({dataset:{action:'snapshot-create',uuid:'FREE'}})");assert.match(run('html'),/Client Ed25519 public key/);assert.match(run('html'),/name="trusted_client"/);
+ context.form={dataset:{form:'snapshot-create'},values:{uuid:'FREE',name:'Laptop',account:'ynpsnap_laptop',public_key:'ssh-ed25519 test',lan:'192.168.1.0/24'},elements:{trusted_client:{checked:false}}};
+ await assert.rejects(run('submit(form)'),/trusted/);assert.equal(run('calls.length'),0);
+ context.form.elements.trusted_client.checked=true;await run('submit(form)');assert.equal(run('calls[0].op'),'snapshot.create');assert.equal(run('calls[0].p.trusted_client'),true);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+""")
+
+    def test_power_dialog_and_submit_require_extra_clone_checkbox(self):
+        self.js(r'''
+context.FormData=class {constructor(form){return Object.entries(form.values);}};
+run(`let html='',calls=[],cloneActive=true;dialog=(title,body)=>{html=body;};
+api=async()=>({hostname:'test-nas',warning:'Review',active_jobs:cloneActive?[{operation:'storage.clone'}]:[],clone_active:cloneActive,usb_disks:[]});
+action=async(op,params)=>{calls.push({op,params});};closeDialog=()=>{};`);
+(async()=>{
+ await run("clickAction({dataset:{action:'power',kind:'reboot'}})");
+ assert.match(run('html'),/I understand there is an ongoing clone and that rebooting will cause possible data loss on both disks\./);
+ assert.match(run('html'),/<input required [^>]*name="clone_acknowledged"/);
+ context.form={dataset:{form:'power'},values:{kind:'reboot',confirmation:'REBOOT test-nas',clone_ack_required:'1'},elements:{warnings_acknowledged:{checked:true},clone_acknowledged:{checked:false}}};
+ await assert.rejects(run('submit(form)'),/Acknowledge the ongoing clone/);assert.equal(run('calls.length'),0);
+ context.form.elements.clone_acknowledged.checked=true;await run('submit(form)');
+ assert.equal(run('calls[0].op'),'system.reboot');assert.equal(run('calls[0].params.clone_acknowledged'),true);
+ run('cloneActive=false');await run("clickAction({dataset:{action:'power',kind:'shutdown'}})");
+ assert.ok(!run('html').includes('name="clone_acknowledged"'));
+})().catch(e=>{console.error(e);process.exitCode=1;});
+''')
+
+    def test_clone_cancel_is_only_offered_for_active_jobs_and_requires_confirmation(self):
+        self.js(r'''
+context.FormData=class {constructor(form){return Object.entries(form.values);}};
+run(`user={role:'admin'};state={devices:{devices:[]},jobs:[]};let calls=[];action=async(op,p)=>{calls.push({op,p});return {state:'Cancellation requested'};};closeDialog=()=>{};`);
+assert.equal(run("jobStatus({operation:'storage.clone',status:'failed',error:'Clone interrupted by administrator.'})"),'Interrupted');
+assert.equal(run("jobStatus({operation:'storage.clone',status:'failed',error:'Read failure'})"),'failed');
+assert.match(run("cloneReport({id:'test-job',status:'running',result:{},params:{}})"),/Cancel clone \/ recovery/);
+assert.match(run("cloneReport({id:'test-job',status:'running',result:{state:'Stopping'},params:{}})"),/disabled>Stopping/);
+assert.ok(!run("cloneReport({id:'test-job',status:'completed',result:{},params:{}})").includes('data-action="clone-cancel"'));
+context.form={dataset:{form:'clone-cancel'},values:{id:'test-job'},elements:{acknowledge_interrupt:{checked:false}}};
+(async()=>{
+ await assert.rejects(run('submit(form)'),/destination may be incomplete/);assert.equal(run('calls.length'),0);
+ context.form.elements.acknowledge_interrupt.checked=true;await run('submit(form)');
+ assert.equal(run('calls[0].op'),'storage.clone_cancel');assert.equal(run('calls[0].p.acknowledge_interrupt'),true);
+ assert.equal(run('calls[0].p.id'),'test-job');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+''')
 
     def test_system_state_export_available_without_clonable_os_and_requires_sensitive_ack(self):
         self.js(r'''
@@ -65,6 +179,21 @@ assert.ok(!storage.includes('data-action="disk-reinitialize"'));
 run("state.clone_jobs[0].status='failed';state.clone_jobs[0].error='unreadable source';");
 assert.match(run('advancedDisksPage()'),/unreadable source/);assert.match(run('cloneHistory()'),/View full report and command log/);
 ''')
+
+    def test_duplicate_erase_dialog_requires_device_path_and_preserves_format_confirmation(self):
+        self.js(r"""
+context.FormData=class {constructor(form){return Object.entries(form.values);}};
+run(`state={devices:{devices:[{type:'disk',stable_id:'test-disk',path:'/dev/sdz'}]}};let html='',calls=[];
+dialog=(title,body)=>{html=body;};api=async()=>({device:{path:'/dev/sdz',stable_id:'test-disk',serial:'TESTONLY'},partitions:[],filesystems:['ext4','btrfs','ntfs'],fingerprint:'fp',observed_at:123,confirmation:'FORMAT /dev/sdz',requires_duplicate_confirmation:true,duplicate_filesystems:[{copies:[{path:'/dev/sdz1'},{path:'/dev/sdy1'}]}]});
+const actions={innerHTML:''};completedAction=async(op,p)=>{calls.push({op,p});};progress=()=>{};refresh=async()=>{};toast=()=>{};`);
+(async()=>{
+ await run("clickAction({dataset:{action:'disk-reinitialize',id:'test-disk'}})");
+ assert.match(run('html'),/Shared\/duplicate filesystem UUIDs/);assert.match(run('html'),/finished clone/);assert.match(run('html'),/name="duplicate_device"/);assert.match(run('html'),/Type FORMAT \/dev\/sdz/);assert.match(run('html'),/\/dev\/sdy1/);
+ context.form={dataset:{form:'destructive-storage'},values:{kind:'reinitialize',stable_id:'test-disk',filesystem:'btrfs',fingerprint:'fp',observed_at:'123',confirmation:'FORMAT /dev/sdz',duplicate_required:'/dev/sdz',duplicate_device:'/dev/sdy'},elements:{acknowledge_erase:{checked:true}},querySelectorAll:()=>[],querySelector:()=>run('actions')};
+ await assert.rejects(run('submit(form)'),/exact selected disk device path/);assert.equal(run('calls.length'),0);assert.ok(!context.form.dataset.initializationAttempted);
+ context.form.values.duplicate_device='/dev/sdz';await run('submit(form)');assert.equal(run('calls[0].p.duplicate_device'),'/dev/sdz');assert.equal(run('calls[0].p.confirmation'),'FORMAT /dev/sdz');assert.equal(run('calls[0].op'),'storage.reinitialize');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+""")
 
     def test_destructive_disk_results_are_terminal_and_submit_exact_action_payloads(self):
         self.js(r'''

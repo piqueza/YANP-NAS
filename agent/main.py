@@ -18,8 +18,10 @@ import struct
 import threading
 import time
 
+from .snapshot_server import SnapshotServer
+from .snapshot_receive import recover_receives
 from .migration import Migration
-from .clones import Clones, candidate_reason, system_disks
+from .clones import Clones, CloneCancelled, cancel_clone, candidate_reason, system_disks
 from .backups import Backups, backup_options, browse_components
 from .browse import VolumeBrowser
 from .core import DB, Error, Locks, Runner, boolean, integer, json_default, keys, require, has_sensitive_fields
@@ -37,13 +39,13 @@ from .system import System
 
 
 OPERATIONS = {
-    "system.state_export", "storage.clone", "storage.disable_auto_mount", "storage.reinitialize", "storage.delete_partition", "storage.name", "storage.mount", "storage.unmount", "storage.initialize", "storage.format_partition", "directory.create", "directory.rename", "directory.access", "directory.user_access",
+    "snapshot.client_create", "snapshot.client_update", "snapshot.client_policy", "snapshot.client_command", "snapshot.client_remove", "snapshot.destination_create", "snapshot.destination_remove", "snapshot.create", "snapshot.configure", "snapshot.delete", "snapshot.remove", "system.state_export", "storage.clone", "storage.disable_auto_mount", "storage.reinitialize", "storage.delete_partition", "storage.name", "storage.mount", "storage.unmount", "storage.initialize", "storage.format_partition", "directory.create", "directory.rename", "directory.access", "directory.user_access",
     "share.save", "share.remove", "backup.save", "backup.run", "backup.restore", "backup.measure", "smart.read",
     "system.updates", "system.install", "system.reboot", "system.shutdown", "firewall.change",
     "fail2ban.ban", "fail2ban.unban", "fail2ban.configure", "account.state", "system.service",
 }
-READS = {"storage.clone_plan","storage.signatures", "storage.reinitialize_plan", "storage.delete_partition_plan", "storage.browse", "state", "job.read", "backup.inspect", "system.warnings", "firewall.status", "fail2ban.status", "storage.initialize_plan", "storage.format_plan"}
-SYNC = {"account.sync", "firewall.confirm", "monitoring.save", "event.ack", "event.ack_all"}
+READS = {"snapshot.client_view","snapshot.client_installer","snapshot.candidates","snapshot.inspect","storage.clone_plan","storage.signatures", "storage.reinitialize_plan", "storage.delete_partition_plan", "storage.browse", "state", "job.read", "backup.inspect", "system.warnings", "firewall.status", "fail2ban.status", "storage.initialize_plan", "storage.format_plan"}
+SYNC = {"snapshot.client_update","snapshot.client_policy","snapshot.client_command","storage.clone_cancel","account.sync", "firewall.confirm", "monitoring.save", "event.ack", "event.ack_all"}
 
 
 class Agent:
@@ -54,10 +56,15 @@ class Agent:
         self.monitor = Monitor(config, self.db, self.locks)
         self.ready = queue.Queue()
         self.enqueue_lock = threading.Lock()
-        self.db.execute("UPDATE jobs SET status='failed',error='Agent restarted during execution. Inspect live system state before retrying.',ended_at=UTC_TIMESTAMP() WHERE status='running'")
+        self.db.execute("UPDATE jobs SET status='failed',error='Agent restarted during execution. Inspect live system state before retrying.',ended_at=UTC_TIMESTAMP() WHERE status='running' AND operation NOT IN ('snapshot.receive','snapshot.send')")
+        recover_receives(self.db)
         for row in self.db.query("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at"):
             self.ready.put(row["id"])
         if start:
+            if self.db.setting('snapshot_control_enabled',False) is True:
+                from .snapshot_control import start_listener
+                try:start_listener(self.config,self.db,self.locks)
+                except Exception:logging.error('Snapshot control listener unavailable; check TLS configuration and port 9444')
             self.firewall.recover()
             threading.Thread(target=self.worker, daemon=True, name="job-worker").start()
             threading.Thread(target=self.rollback_loop, daemon=True, name="firewall-rollback").start()
@@ -87,6 +94,23 @@ class Agent:
     def request(self, op, actor, params, root=False):
         user = self.authorize(op, actor, params, root)
         runner = Runner()
+        if op in ('snapshot.client_installer','snapshot.client_view'):
+            from .snapshot_control import ClientControl
+            client_control=ClientControl(self.config,self.db,self.locks)
+            return (client_control.installer if op=='snapshot.client_installer' else client_control.view)(params)
+        if op in ('snapshot.client_update','snapshot.client_policy','snapshot.client_command'):
+            from .snapshot_control import ClientControl
+            require(isinstance(params,dict) and len(json.dumps(params))<=32768 and not has_sensitive_fields(params),'Invalid or credential-bearing client parameters')
+            control=ClientControl(self.config,self.db,self.locks)
+            result={'snapshot.client_update':control.update_preference,'snapshot.client_policy':control.configure,'snapshot.client_command':control.command}[op](params)
+            self.db.audit(actor,op,params)
+            self.db.event(op,'Client policy/command saved for '+params['account'],actor=actor)
+            return result
+        if op in ('snapshot.candidates','snapshot.inspect'):
+            with self.locks.hold('storage'):
+                server=SnapshotServer(self.config,self.db,runner)
+                if op=='snapshot.candidates':keys(params);return server.candidates()
+                return server.inspect(params)
         if op == 'storage.clone_plan':
             with self.locks.hold('storage'):
                 return Clones(self.config,Devices(self.config,runner),self.db,runner).plan(params)
@@ -133,6 +157,8 @@ class Agent:
         if op == "fail2ban.status":
             keys(params)
             return Fail2ban(self.config, self.db, runner).status()
+        if op == 'storage.clone_cancel':
+            return cancel_clone(self.db,params,actor)
         if op in SYNC:
             # Validate first: invalid requests must not smuggle secrets into audit.
             if op == "account.sync":
@@ -174,6 +200,8 @@ class Agent:
 
     def enqueue(self, op, actor, params):
         # All detailed validation repeats in the worker against current live Linux state.
+        if op in ('system.reboot','system.shutdown'):
+            System(self.config,self.db,Runner()).validate_power(params,op.split('.')[1])
         if op == 'storage.clone':
             require(not self.db.query("SELECT id FROM jobs WHERE operation='storage.clone' AND status IN ('queued','running') LIMIT 1"),
                     'A disk clone is already queued or running')
@@ -193,6 +221,7 @@ class Agent:
         admin = user["role"] == "admin"
         names = StorageNames(self.db)
         if admin:
+            recover_receives(self.db)
             devices, volumes = names.decorate(self.db.setting('observed_devices'),self.db.query('SELECT * FROM volumes'))
             clone_jobs=self.db.query("SELECT id,operation,status,params,result,error,started_at,ended_at,created_at FROM jobs WHERE operation='storage.clone' ORDER BY created_at DESC LIMIT 100")
             for clone in clone_jobs:
@@ -211,7 +240,7 @@ class Agent:
             jobs = self.db.query("SELECT id,actor_id,operation,status,error,backup_id,started_at,ended_at,created_at FROM jobs ORDER BY created_at DESC LIMIT 50")
             events = self.db.query('SELECT * FROM events ORDER BY id DESC LIMIT 100')
             notification_summary = Notifications(self.db).summary(max((e['id'] for e in events),default=0))
-            return {"clone_jobs":clone_jobs,"devices": devices, "system": self.db.setting("observed_system"),
+            return {"snapshot_server":SnapshotServer(self.config,self.db,Runner()).candidates(nodes),"clone_jobs":clone_jobs,"devices": devices, "system": self.db.setting("observed_system"),
                 "smart": self.db.setting("observed_smart"), "security": self.db.setting("observed_security"),
                 "share_status": self.db.setting("observed_shares"), "timers": self.db.setting("observed_timers"),
                 "directories": directories, "access": self.db.query("SELECT * FROM directory_access"),
@@ -241,7 +270,14 @@ class Agent:
         backups = Backups(self.config, self.db, runner)
         system = System(self.config, self.db, runner)
         f2b = Fail2ban(self.config, self.db, runner)
+        snapshot_server=SnapshotServer(self.config,self.db,runner)
+        from .snapshot_control import ClientControl
+        clients=ClientControl(self.config,self.db,self.locks)
         mapping = {
+            "snapshot.client_create":clients.create,"snapshot.client_policy":clients.configure,"snapshot.client_command":clients.command,"snapshot.client_remove":clients.remove,
+            "snapshot.destination_create":snapshot_server.create_destination,"snapshot.destination_remove":snapshot_server.remove_destination,
+            "snapshot.create":snapshot_server.create,"snapshot.configure":snapshot_server.configure,
+            "snapshot.delete":snapshot_server.delete,"snapshot.remove":snapshot_server.remove,
             "system.state_export": lambda x: Migration(self.config,self.db,runner).export(x),
             "storage.clone": lambda x: Clones(self.config,storage.devices,self.db,runner).execute(x),
             "storage.reinitialize": lambda x: Eraser(storage.devices,self.db,runner).execute(x),
@@ -272,14 +308,21 @@ class Agent:
             ident = self.ready.get()
             try:
                 row = self.db.query("SELECT * FROM jobs WHERE id=%s", (ident,))[0]
+                if row['status']!='queued':continue
                 p = json.loads(row["params"])
                 self.authorize(row["operation"], row["actor_id"] or 0, p, root=row["actor_id"] is None)
-                self.db.execute("UPDATE jobs SET status='running',started_at=UTC_TIMESTAMP() WHERE id=%s", (ident,))
+                with self.db.connection() as connection,connection.cursor() as cursor:
+                    cursor.execute("UPDATE jobs SET status='running',started_at=UTC_TIMESTAMP() WHERE id=%s AND status='queued'",(ident,))
+                    claimed=cursor.rowcount==1
+                if not claimed:continue
                 self.db.event("job.running", f"{row['operation']} running", actor=row["actor_id"])
-                lock = "storage" if row["operation"] == "system.state_export" or row["operation"].split(".")[0] in ("storage", "directory", "share", "backup", "smart", "account") else "system"
+                lock = "storage" if row["operation"] == "system.state_export" or row["operation"].split(".")[0] in ("snapshot", "storage", "directory", "share", "backup", "smart", "account") else "system"
                 # Monitor may be collecting SMART; queued commands retry the lock immediately.
                 deadline = time.monotonic() + 120
                 while True:
+                    if row['operation']=='storage.clone' and self.db.setting('clone_cancel_'+ident,False) is True:
+                        raise CloneCancelled({'state':'Interrupted','cancelled':True,'cancelled_before_start':True,
+                                              'note':'Cancelled before acquiring storage access; no clone writes were started.'})
                     try:
                         with self.locks.hold(lock):
                             self.authorize(row["operation"], row["actor_id"] or 0, p, root=row["actor_id"] is None)
@@ -291,6 +334,9 @@ class Agent:
                         time.sleep(.2)
                 self.db.execute("UPDATE jobs SET status='completed',result=%s,ended_at=UTC_TIMESTAMP() WHERE id=%s", (json.dumps(result, default=json_default), ident))
                 self.db.event("job.completed", f"{row['operation']} completed", actor=row["actor_id"])
+            except CloneCancelled as exc:
+                self.db.execute("UPDATE jobs SET status='failed',result=%s,error=%s,ended_at=UTC_TIMESTAMP() WHERE id=%s",(json.dumps(exc.report),str(exc),ident))
+                self.db.event('job.cancelled',f'Clone {ident} interrupted by administrator','warning')
             except Exception as exc:
                 logging.exception("Job %s failed", ident)
                 self.db.execute("UPDATE jobs SET status='failed',error=%s,ended_at=UTC_TIMESTAMP() WHERE id=%s", (str(exc)[:8000], ident))

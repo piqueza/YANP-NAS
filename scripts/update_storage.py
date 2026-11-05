@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from agent.core import DB, Runner, atomic_write, require
+from agent.core import DB, Runner, Locks, atomic_write, require
 
 DIRECTORIES = ('agent', 'web', 'migrations', 'scripts', 'deploy', 'docs')
 FILES = ('README.md', 'LICENSE', 'VERSION')
@@ -76,11 +76,12 @@ def deploy(source, installed, backup, db, run, agent_unit=Path('/etc/systemd/sys
     timers = run.run(['systemctl', 'list-units', '--type=timer', '--state=active',
                       '--no-legend', '--plain', 'yanp-backup-*.timer'])
     active_timers = [line.split()[0] for line in timers.splitlines() if line.strip()]
+    snapshot_ssh=run.run(['systemctl','is-active','yanp-snapshot-sshd.service'],allowed=(0,3,4)).strip()=='active'
     stopped = []
     replaced = False
     unit_replaced = False
     try:
-        for service in [*active_timers, 'apache2']:
+        for service in [*active_timers, *(['yanp-snapshot-sshd'] if snapshot_ssh else []), 'apache2']:
             run.run(['systemctl', 'stop', service], timeout=120)
             stopped.append(service)
         idle(db)
@@ -144,17 +145,19 @@ def main():
     require([r['version'] for r in db.query('SELECT version FROM schema_versions ORDER BY version')] == [1],
             'Unexpected database schema; no database migration is performed')
     idle(db)
-    require(not Path('/var/lib/yanp-nas/firewall-pending.json').exists(), 'Finish the pending firewall change first')
-    run = Runner()
-    run.run(['apt-get', 'update'], timeout=600)
-    run.run(['apt-get', 'install', '-y', 'tdb-tools', 'gddrescue', 'ntfs-3g', 'btrfs-progs', 'fdisk', 'e2fsprogs', 'udev'], timeout=600)
-    stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-    backup = Path('/var/backups/yanp-nas') / ('storage-update-' + stamp)
-    backup.mkdir(parents=True, mode=0o700)
-    apply_read_grants(run, config)
-    deploy(source, installed, backup, db, run)
-    print(f'YANP Nas feature update complete. Previous code: {backup / "application"}')
-    print('Reload the browser to use the updated storage, user and share workflows. No filesystem was formatted or automatically mounted.')
+    with Locks(config.get('lock_root','/run/yanp-nas/locks')).hold('storage'):
+        require(not Path('/var/lib/yanp-nas/firewall-pending.json').exists(), 'Finish the pending firewall change first')
+        run = Runner()
+        run.run(['apt-get', 'update'], timeout=600)
+        run.run(['apt-get', 'install', '-y', 'openssh-server', 'sudo', 'tdb-tools', 'gddrescue', 'ntfs-3g', 'btrfs-progs', 'fdisk', 'e2fsprogs', 'udev'], timeout=600)
+        stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+        backup = Path('/var/backups/yanp-nas') / ('storage-update-' + stamp)
+        backup.mkdir(parents=True, mode=0o700)
+        apply_read_grants(run, config)
+        deploy(source, installed, backup, db, run)
+        print(f'YANP Nas feature update complete. Previous code: {backup / "application"}')
+        print('Reload the browser to use the updated storage, user and share workflows. No filesystem was formatted or automatically mounted.')
+
 
 
 if __name__ == '__main__':

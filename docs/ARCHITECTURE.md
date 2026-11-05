@@ -266,3 +266,47 @@ passdb only while Samba is stopped, retaining the previous passdb in the private
 pre-migration backup. The code never performs TDB-to-TDB pdbedit export/import:
 that backend has process-global state and can silently enumerate the wrong DB.
 Native tests exercise the actual helper functions against private Samba files.
+
+### Clone interruption
+
+`storage.clone_cancel` is a synchronous admin-only request outside the storage
+lock/worker queue. It validates a clone job ID plus strict acknowledgement, writes
+a durable per-job cancellation flag and atomically cancels entries still queued.
+The worker's conditional queued-to-running claim prevents revival of a cancelled
+entry. A pending clone observes flags even while waiting for storage access.
+The owning copy loop signals only its own Popen process group, drains output and
+reads the final map before releasing pinned devices. Reports remain active while
+stopping, with Interrupted as a distinct UI state after process exit. No schema
+or arbitrary-PID signalling API is introduced.
+
+## Native Btrfs receive service
+
+`agent/snapshot_server.py` manages independent destination volume allocations and restricted
+clients. Multiple clients can share a destination, each with a verified receive
+subvolume ID. Destination creation does not create SSH accounts. A separate `yanp-snapshot-sshd` listener invokes the fixed unprivileged
+`scripts/snapshot_ssh.py` shell; an exact sudoers rule permits only the isolated
+Python receive entry point. `agent/snapshot_receive.py` verifies the invoking
+numeric identity against the registry and confines native receive to that
+client’s subvolume (with legacy filesystem-root receivers explicitly segregated). It shares and passes the storage flock to the native child. Registry
+allocation checks are also enforced by normal storage/backup/destructive paths.
+See [snapshot server operations and trust model](SNAPSHOT_SERVER.md).
+
+## Managed Btrfs client control
+
+`agent/snapshot_control.py` owns the bounded TLS listener on TCP 9444, private
+root-only enrollment/control records, installer generation, durable commands and
+periodic NAS retention. Control metadata lives outside the public web root and
+source tree; normal state/detail responses use field allowlists without credential
+hashes. The client generates its own SSH private key and long-lived control secret.
+`agent/snapshot_stream.py` verifies per-source receive scopes and native snapshot
+identities, runs fixed send/receive operations under inherited storage locks and
+retains baselines/transfer parents. Installer downloads are admin/CSRF protected.
+
+The standalone `scripts/snapshot_client.py` is installed by
+`scripts/install_snapshot_client.py` into a root systemd service. Scheduling,
+network polling, upload and command execution are separate; local policies,
+command IDs and snapshot intents are written atomically. All data mutation is
+restricted to allowlisted native Btrfs operations with identity checks. Client
+subvolume deletion uses a native ID and expiring typed confirmation. Returns use
+a separate restore area and never initiate OS rollback. No inbound client web
+service, arbitrary remote shell or automatic client code update is provided.

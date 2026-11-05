@@ -171,6 +171,21 @@ class InitializationSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(Error,'formatting refused'):init.initialize(self.params(node))
         self.assertFalse(any(call.args[0][0]=='mkfs.ext4' for call in run.run.call_args_list))
 
+    def test_confirmed_eraser_can_prepare_residual_contents_before_formatting(self):
+        init,node,run,state=self.fixture(unexpected_partition=True);prepared=[]
+        def prepare(disk,part,path,verify):
+            self.assertEqual(part['fstype'],'ntfs');self.assertEqual(disk['path'],node['path'])
+            self.assertFalse(any(c.args[0][0] in FORMATTERS.values() for c in run.run.call_args_list))
+            prepared.append(path)
+        with patch('agent.initialize.pinned_disk',fake_pin),patch('agent.initialize.verify_partition'),patch('agent.initialize.shutil.which',return_value='/usr/bin/fixture'),patch('agent.initialize.Path.exists',return_value=True):
+            result=init.initialize({**self.params(node),'filesystem':'btrfs'},prepare_partition=prepare)
+        self.assertEqual(result['filesystem'],'btrfs');self.assertEqual(prepared,['/dev/disk/by-partuuid/'+state['partition_uuid']])
+
+    def test_client_payload_cannot_enable_residual_erasure_on_normal_initialization(self):
+        init,node,run,_=self.fixture(unexpected_partition=True)
+        with self.assertRaises(Error):init.initialize({**self.params(node),'prepare_partition':True})
+        run.run.assert_not_called()
+
     def test_format_failure_does_not_retry_partitioning_or_claim_rollback(self):
         init,node,run,_=self.fixture(fail_mkfs=True)
         with patch('agent.initialize.pinned_disk',fake_pin),patch('agent.initialize.verify_partition'),patch('agent.initialize.shutil.which',return_value='/usr/bin/fixture'),patch('agent.initialize.Path.exists',return_value=True):

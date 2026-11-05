@@ -1,5 +1,203 @@
 # Validation and target-server acceptance
 
+## Incremental parent confirmation and full-copy fallback, 5 November 2026
+
+The build passes **379 local checks** (380 run; root/systemd APT check skipped),
+including the separately permitted loopback TLS check. New regressions reproduce
+the stale NAS catalogue immediately after a completed upload and prove that no
+second full stream starts, and prove incremental errors invoke the pipeline only
+once with `-p` and preserve the unuploaded snapshot for retry. Native receiver
+stdout is included in failed-pipeline diagnostics; mode/parent are logged before
+transfer. No deployed transfer was interrupted by these tests. The observed live
+full send is confirmed by the user's process listing; logs did not establish
+whether it came from the catalogue gap or the former incremental-error fallback.
+
+## Operator-controlled client updates, 5 November 2026
+
+The build passes **377 local checks** (378 total; root/systemd APT check skipped)
+and **63 isolated integration checks**. The full suite ran 377 tests before the
+final exec-failure recovery test was added; the focused updater/UI suite passed
+afterward. The real loopback TLS test ran separately with network permission and
+now exercises agent download, disabled-update refusal and bootstrap-token refusal.
+Tests cover default-off/legacy handling, client identity/LAN/current digest checks,
+report validation, checksum failure, idle/busy deferral, native preflight failure,
+atomic installation/previous-script preservation, immediate exec failure recovery,
+version reporting and migration opt-out. Integration verifies administrator-only
+update controls through the web API. Synthetic browser QA verifies System and
+Dashboard notices and the per-client opt-in dialog. No real client was updated
+and no NAS was changed. Actual systemd re-exec on a client, with concurrent native
+send/receive and disconnect/reconnect, still requires two-machine acceptance.
+Preflight does not establish that future agent builds have no runtime bugs;
+post-exec rollback uses the documented manual previous-script recovery procedure.
+
+## Snapshot source estimates and destination space, 5 November 2026
+
+The build passes **367 local checks** (368 total; root/systemd APT check skipped).
+The full suite ran 367 tests before the final native-du test was added; that test
+and the focused UI/size suite passed afterward, with the loopback TLS check run
+separately with network permission. Tests cover optional/bounded reports, cached
+scans and failure states, polling during a blocked scan, pinned source IDs,
+non-following native du on sparse files and external symlinks, live mount UUID/type
+validation before statvfs, read-only destinations and individual/combined initial
+capacity warnings. Browser QA used synthetic 80/160-GiB sources and a 100-GiB-free
+destination; no NAS or real client was changed. Native mounted-Btrfs boundary and
+space/compression behavior remain part of the two-machine acceptance check.
+
+## Snapshot SSH directory permissions, 5 November 2026
+
+The build passes **360 local checks** (361 run; root/systemd APT check skipped),
+including the loopback TLS check run separately with network permission. New
+regressions reproduce creation under the agent's 0077 umask and repair existing
+0700 public-key directories while preserving key contents/private-key modes.
+Symlinked, foreign-owned and group/world-writable directories are refused. The
+focused snapshot server/control suite passes 59 tests. The fix is applied by
+receiver creation or an existing receiver access save. No live NAS/client
+configuration was inspected or changed; receiver logs are needed to confirm the
+reported deployment failure. Native SSH authentication on the target remains a
+deployment acceptance check.
+
+## Clear client subvolume descriptions, 5 November 2026
+
+The updated build passes **358 local checks** (359 run; root/systemd APT check
+skipped), including the loopback TLS check run separately with network permission.
+Three new tests cover actual mountpoint mapping, exclusion of private agent mounts,
+optional inventory fields and invalid mountpoint refusal, plus friendly labels for
+root, home, ID 5, other mounts and older clients. Synthetic browser QA confirms
+the system/personal/top-level descriptions and collapsed technical identifiers.
+No real NAS or client was changed. Existing agents need the documented program-only
+update to report mountpoints; older reports remain compatible and use qualified
+labels. The previously recorded 63 integration checks were not repeated for this
+presentation/reporting change.
+
+## Managed Btrfs client agents, 5 November 2026
+
+The build passes **355 local checks** (356 run; root/systemd APT check skipped)
+and **63 isolated integration checks**. A real loopback TLS fixture verifies
+pinned-certificate enrollment/polling, anonymous refusal, request size bounds and
+single-use credential transition, with all account/disk actions mocked. Tests
+cover private ZIP contents, credential redaction, rejected credential-bearing
+job payloads, source/command validation, durable command replay, independent
+per-source baselines, offline scheduling and control polling during a blocked
+upload. They also cover NAS policy updates while the storage lock is held,
+native-ID client deletion guards, expiring destructive confirmations, guarded
+snapshot return and retry without automatic rollback, protected retention,
+per-source receive scopes, binary stream framing without JSON trailers and
+revocation even when Linux-account cleanup fails. Managed migration records keep
+credential bindings with bootstrap tokens revoked and queued commands cancelled.
+
+Web/database checks include administrator-only client endpoints, filtered state
+and detail responses, and passive client-detail polling that cannot renew idle
+sessions. Browser QA uses synthetic pending/initialised clients and verifies the
+creation form, multi-source page, policy controls and read-only return dialogue.
+No NAS or real client was accessed or changed. Actual systemd installation and
+mounted-Btrfs full/incremental transfer, mid-stream disconnect recovery, retention
+and return still require a two-machine target acceptance test. Local fixtures
+validate control flow/guards; they do not prove native mounted-filesystem behavior.
+See [managed client setup and acceptance](SNAPSHOT_SERVER.md).
+
+
+## Independent Btrfs destinations and clients, 5 November 2026
+
+The build passes **323 local checks** (324 run; root/systemd APT check skipped)
+and **62 isolated integration checks**. Destination creation accepts only volume
+and name and is checked to create no SSH account/listener. Tests cover clients
+requiring an existing destination, two clients sharing one volume with distinct
+subvolume IDs, confined client-root lookup and changed-ID/symlink refusal,
+retained destinations on client removal, destination-removal dependency checks,
+failed-client access revocation, legacy layout recognition and migration of a
+shared destination with all clients disabled. Frontend checks verify independent
+forms/payloads and allocation filtering. API checks include administrator-only
+destination create/remove and invalid destination creation without disk/account
+changes. Synthetic browser QA shows a two-client destination, an empty ready
+destination and the volume/name-only creation dialog.
+
+No NAS storage, accounts or SSH listener were changed. Full/incremental native
+receives in per-client subvolumes on one mounted filesystem still require real
+Btrfs target acceptance; local receive command/path checks do not establish that
+acceptance. See [snapshot operations](SNAPSHOT_SERVER.md) for the trusted-client
+boundary and handling of original filesystem-root clients.
+
+
+## Clone duplicate-UUID erase confirmation, 5 November 2026
+
+The build passes **318 local checks** (319 run; root/systemd APT check skipped).
+New checks cover missing/wrong/invalid duplicate-device confirmation, successful
+selected-disk-only writes with another clone connected, peer hardware changes
+invalidating the preview, mounted/allocated storage refusal and native single-
+device Btrfs proof requirements. Existing RAID and partition-deletion guards
+remain covered. Frontend checks verify the warning, peer list, exact-device field,
+unchanged FORMAT confirmation and rejection before any submission/terminal form
+state when the device entry is wrong. Synthetic browser QA verifies the dialog.
+No NAS disk or real clone was changed. The latest isolated API suite remains the
+62 checks recorded below; this change adds no operation or privilege endpoint.
+
+
+## Residual filesystem signatures after partition deletion, 5 November 2026
+
+The build passes **312 local checks** (313 run; root/systemd APT check skipped).
+A native disposable-image regression creates an ext4 payload inside a GPT disk,
+deletes its partition entry with sfdisk and demonstrates that the whole-disk
+probe sees only GPT while probing the old partition offset still detects ext4.
+The confirmed-erasure preparation helper clears signatures from a disposable
+partition image and native mkfs.btrfs succeeds without a force option. Hardware
+identity/in-use checks in this regular-file test are mocked; no real device is
+changed. Further checks cover refusal of newly exposed RAID/encryption/table
+signatures, allocated UUIDs, newly busy devices, incomplete signature removal,
+pre-format preparation order and inability to enable erasure via ordinary
+initialization API payloads. Duplicate-UUID protections remain in force.
+
+
+## BTRFS Snapshot Server first draft, 5 November 2026
+
+The build passes **306 local checks** (307 run; root/systemd APT check skipped)
+and **62 isolated integration checks**. New coverage checks private LAN/key
+validation, account namespaces, allocation conflicts, existing-data preservation,
+restricted account creation and failure revocation, native OpenSSH/sudoers syntax,
+byte-exact binary stream framing, confined receive arguments, inherited storage
+locks, PID/boot recovery, no-follow snapshot identity deletion and disabled
+migration restoration. UI checks cover navigation, destination forms, trust
+acknowledgement, reserved-volume filtering and the client-installer placeholder.
+API checks enforce administrator-only reads/mutations and invalid-request refusal
+without creating accounts or changing disks. Synthetic browser QA verifies the
+page, create dialog and received-subvolume list.
+
+No NAS was accessed, no physical disk was changed, and no real SSH account or
+listener was installed. A full/incremental receive into mounted Btrfs, real SSH
+login, firewall/subnet enforcement and boot persistence require target acceptance;
+see [Btrfs snapshot server operations](SNAPSHOT_SERVER.md).
+
+## Clone output and power safeguards, 5 November 2026
+
+The build passes **285 local checks** (286 run, root/systemd APT check skipped)
+and **61 isolated integration checks**. Output tests cover bounded whole-line
+retention, partial chunks, CR/CRLF boundaries, final unterminated lines and
+oversized-line discard. Power tests cover both actions, exact confirmations,
+strict clone acknowledgement, enqueue rejection before job creation and a clone
+appearing between the first validation and scheduling. Real DB tests use a
+detached Agent queue with no worker, ensuring no power command can run even on
+regression. Browser QA uses a synthetic fixture with all power actions disabled;
+required-field validation blocks submission with the clone checkbox unticked.
+No NAS disk, job, reboot or shutdown was accessed or executed.
+
+
+## Clone cancellation and sidebar alignment, 5 November 2026
+
+The build passes **279 local unit/native checks** (280 run; root/systemd APT
+check skipped) and **60 isolated integration checks**. A native, rate-limited
+ddrescue copy between disposable files is interrupted through the real copy loop;
+the final recovery map/progress remain and the source bytes are unchanged. Checks
+cover strict admin-only cancellation acknowledgement, job identity/type/status,
+queued terminal cancellation, pre-start no-write behavior and requests while the
+storage lock is held. Integration uses both a synthetic running record and a real
+queued worker job blocked by a test lock; cancellation completes without waiting
+for storage access. Worker claims are conditional to avoid reviving cancelled
+queue entries. UI checks cover confirmation, active-only buttons, Stopping state
+and Interrupted display. Browser QA uses synthetic disks, exercises acknowledgement
+and cancellation, and confirms aligned navigation after removing the special
+sidebar indent shared by desktop/mobile views. No NAS job or physical disk was
+accessed or interrupted.
+
+
 ## Samba TDB migration correction, 4 November 2026
 
 The corrected build passes **274 local checks** (275 run; the root/systemd APT

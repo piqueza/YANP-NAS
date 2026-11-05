@@ -2,6 +2,86 @@
 
 ## 0.2.0 — 2026-10-31
 
+- Wait for NAS catalogue confirmation after a completed client upload instead of
+  starting another full send during the polling gap. Remove silent full fallback
+  after incremental errors; log transfer mode/parent and native receiver errors.
+
+- Add operator-controlled client agent updates with running-script fingerprints,
+  per-client opt-in, Dashboard/System notices and authenticated pinned-TLS delivery.
+  Verify source hashes/syntax/dependencies, defer until native operations are idle,
+  preserve a previous-script backup and report updated builds in Activity. Legacy
+  agents require one manual bootstrap update; migration disables automatic updates.
+
+- Show cached background client subvolume size estimates, live Btrfs destination
+  capacity and advisory initial-copy space warnings, including combined enabled
+  sources. Keep scans independent of control/uploads and retain unknown/stale
+  states without treating them as zero. Existing clients require a code update.
+
+- Put YANP and client snapshot storage cards first on client management pages.
+  Show local reported counts, creation date and protected parents beside completed
+  NAS transfers; stack YANP above the client on narrow screens.
+
+- Fix snapshot SSH public-key directory traversal under the agent's private
+  umask. Receiver setup/access saves repair root-owned directory modes without
+  changing keys, credentials, password authentication or command restrictions.
+
+- Explain client subvolumes with mountpoint-based System files and Personal files
+  labels, a distinct Btrfs top-level container label and collapsed technical IDs.
+  Report real host mountpoints, exclude private agent mounts and keep older
+  client reports compatible with clearly qualified conventional-name labels.
+
+- Add managed Btrfs client installers and authenticated HTTPS control on TCP 9444.
+  Use expiring one-time enrollment, client-generated private SSH/control keys,
+  pinned TLS/SSH identities and visible uninitialised/initialised client states.
+  Manage multiple source subvolumes, intervals, manual snapshots, client/NAS
+  retention, guarded data subvolume creation/deletion and read-only snapshot return
+  without automatic rollback. Keep offline local policies, separate scheduling/
+  polling/transfers/commands, pin initial baselines and incremental parents,
+  deduplicate durable tasks and expire delayed destructive confirmations.
+  Preserve managed configuration through private state migration with receiver
+  access disabled and queued commands cancelled for review.
+
+- Separate Btrfs destination creation from SSH client/account setup. A named
+  destination can exist with no clients and serve multiple trusted clients in
+  distinct receive subvolumes. Retain destinations when removing clients, guard
+  destination removal until clients are removed and preserve both through state
+  migration. Keep old filesystem-root receivers explicitly identified without
+  moving existing snapshots.
+
+- Allow confirmed whole-disk reclamation of cloned single-device filesystems
+  with duplicate UUIDs. Show the clone warning in the erase dialog and require
+  typing the exact disk path as well as FORMAT confirmation. Bind previews to
+  duplicate-copy identities, write only selected device paths and retain mount,
+  busy/system/RAID/allocation and multi-device Btrfs protections.
+
+- Fix confirmed whole-disk reinitialization stopping after partition creation
+  when deleted partitions leave filesystem signatures at the new partition
+  offset. Recheck device use/identity and allocation before clearing supported
+  residual signatures; verify blankness before formatting without force. Keep
+  ordinary initialization and hidden RAID/encryption/table metadata refusal strict.
+
+- Add BTRFS Snapshot Server with dedicated filesystem allocation, safe blank-disk
+  Btrfs preparation, restricted key-only LAN SSH receive/list accounts on TCP
+  2222, native full/incremental receive, received-subvolume listing/deletion,
+  access revocation, operation history and a client-installer placeholder. Keep
+  receiver allocations protected and migrated receive access disabled. See
+  docs/SNAPSHOT_SERVER.md for trust boundaries and acceptance limitations.
+
+- Keep complete lines in bounded clone live output instead of cutting status
+  labels mid-line. Require an explicit ongoing-clone data-loss checkbox for
+  reboot/shutdown, checked in the UI and agent at submission and scheduling.
+
+- Align Advanced Disk Actions with all other sidebar links on desktop/mobile.
+  Add acknowledged clone/recovery cancellation, graceful ddrescue interruption,
+  queued-job cancellation, Stopping/Interrupted reports, retained recovery maps
+  and process-exit-based disk reservations. Keep cancellation outside the storage
+  lock and prevent cancelled queue entries from starting.
+
+- Serve a real multi-size /favicon.ico fallback as well as the SVG brandmark,
+  so automatic browser icon requests succeed even without a page reference.
+
+- Add the green Y brandmark as a scalable, versioned browser favicon.
+
 - Fix system-state exports rejected as incomplete Samba inventories: use locked
   read-only TDB backups instead of same-backend pdbedit export. Restore the
   verified passdb atomically with Samba stopped and keep the original database

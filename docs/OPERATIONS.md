@@ -260,3 +260,16 @@ the contents of configuration files containing credentials.
 | APT lock failure | Another APT/dpkg process; let it finish, inspect logs, then retry |
 | SMART sleeping or unavailable | Disk standby or controller passthrough support; no automatic wake-up |
 | Interrupted job | Inspect Linux state and captured output before rerunning; it is not automatically replayed |
+
+Power requests during queued/running clone work require a separate explicit
+clone data-loss acknowledgement, in addition to typed hostname confirmation and
+the general jobs/USB review. It is enforced at submission and scheduling, so API
+clients and stale dialogs cannot bypass it. Existing queue/delay rules still apply.
+
+## Btrfs snapshot reception
+
+See [BTRFS Snapshot Server](SNAPSHOT_SERVER.md) for setup, manual full/incremental
+sends, key/subnet restrictions, retained partial receives, destination removal
+and the disabled-by-default migration review sequence. Managed client agents are installed from private per-client packages. See the
+managed-agent section for enrollment, offline scheduling, source selection,
+retention and read-only snapshot return; clients expose no web service.

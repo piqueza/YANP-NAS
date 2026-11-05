@@ -6,7 +6,7 @@ import platform
 import re
 import time
 
-from .core import keys, require
+from .core import keys, require, boolean
 
 
 SERVICES = ("apache2", "mariadb", "smbd", "fail2ban", "yanp-agent", "yanp-firewall")
@@ -89,15 +89,23 @@ class System:
         usb = [d for d in Devices(self.config, self.run).scan()["devices"]
                if d["type"] == "disk" and d.get("tran") == "usb"]
         return {"hostname": platform.node(), "active_jobs": active,
+                "clone_active":any(job["operation"]=="storage.clone" for job in active),
                 "usb_disks": [{"model": d["model"], "serial": d["serial"], "path": d["path"]} for d in usb],
                 "warning": "Clients will disconnect. Finish file transfers and safely disconnect USB storage first."}
 
-    def power(self, p, action):
-        keys(p, ("confirmation", "warnings_acknowledged"))
+    def validate_power(self,p,action):
+        keys(p,("confirmation","warnings_acknowledged"),("clone_acknowledged",))
+        acknowledged=boolean(p.get('clone_acknowledged',False))
         phrase = ("REBOOT " if action == "reboot" else "SHUTDOWN ") + platform.node()
         require(p["confirmation"] == phrase and p["warnings_acknowledged"] is True,
                 f"Review active jobs and USB storage, then confirm {phrase}")
+        active=self.db.query("SELECT id FROM jobs WHERE operation='storage.clone' AND status IN ('queued','running') LIMIT 1")
+        require(not active or acknowledged,'An ongoing clone requires the additional data-loss acknowledgement before reboot or shutdown')
+
+    def power(self, p, action):
+        self.validate_power(p,action)
         warnings = self.power_warnings()
+        self.validate_power(p,action)
         self.run.run(["shutdown", "-r" if action == "reboot" else "-h", "+1", "YANP Nas administrator request"])
         return {"state": "Scheduled", "delay_seconds": 60, "warnings": warnings}
 

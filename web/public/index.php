@@ -6,10 +6,12 @@ header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: same-origin');
 header('Cache-Control: no-store');
 $jsVersion = substr(hash_file('sha256', __DIR__ . '/assets/app.js'), 0, 16);
+$icoVersion = substr(hash_file('sha256', __DIR__ . '/favicon.ico'), 0, 16);
+$iconVersion = substr(hash_file('sha256', __DIR__ . '/assets/favicon.svg'), 0, 16);
 $cssVersion = substr(hash_file('sha256', __DIR__ . '/assets/app.css'), 0, 16);
 ?><!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#101b22">
-<title>YANP Nas · Management</title><link rel="stylesheet" href="assets/app.css?v=<?=$cssVersion?>"><script src="assets/app.js?v=<?=$jsVersion?>" defer></script></head>
+<title>YANP Nas · Management</title><link rel="icon" type="image/x-icon" sizes="16x16 32x32 48x48" href="/favicon.ico?v=<?=$icoVersion?>"><link rel="icon" type="image/svg+xml" sizes="any" href="/assets/favicon.svg?v=<?=$iconVersion?>"><link rel="stylesheet" href="assets/app.css?v=<?=$cssVersion?>"><script src="assets/app.js?v=<?=$jsVersion?>" defer></script></head>
 <body><div id="app"><main class="starting"><div class="brandmark">Y</div><p>Connecting to YANP Nas…</p></main></div>
 <div id="toasts" aria-live="polite"></div><dialog id="dialog"><div id="dialog-content"></div></dialog>
 <noscript>This management interface requires JavaScript. All operations are authorized on the server.</noscript></body></html>

@@ -382,7 +382,7 @@ rescued in the complete map, output must sync successfully and the target's
 partition reread/udev refresh must succeed before the job is marked completed.
 Failures report a potentially partial destination and retain progress/map data.
 There is no automatic retry or resume after interruption. Agent restart marks a
-running job failed. This draft has no pause/cancel/resume buttons, checksum
+running job failed. This draft has no pause/resume buttons, checksum
 verification pass, automatic partition resizing, GPT backup-header relocation or
 UUID regeneration. A larger GPT destination can need header relocation before
 use. Cloning duplicates filesystem/partition UUIDs; keep the clone unmounted until
@@ -392,3 +392,90 @@ those identities are resolved. No cloned filesystem is automatically mounted.
 
 The **Generate system-state installer** action on Advanced Disk Actions is
 available regardless of OS filesystem/snapshot support. See [migration instructions](MIGRATION.md).
+
+## Interrupt a clone or recovery
+
+The **Cancel clone / recovery** button sits beside the job status at the top of
+its active card. Review the warning and tick the acknowledgement before choosing
+**Stop clone / recovery**. Cancelling does not undo destination writes: treat the
+partial destination as incomplete. The source is opened read-only.
+
+Cancellation is administrator-only and reaches the owning worker directly rather
+than queueing behind it or acquiring its storage lock. Queued clones are made
+terminal without starting copy writes. A clone waiting for the storage lock also
+observes cancellation before copying. The worker atomically claims only queued
+jobs, so a cancelled queue entry cannot be revived by the queue consumer.
+
+For running ddrescue, the worker sends SIGINT to its own process group so the
+program can flush its recovery map. The UI shows **Stopping…**, and both disks
+remain reserved until the process has actually exited. If it does not respond,
+the worker escalates after 30 seconds to SIGTERM, then after 60 seconds to SIGKILL.
+An uninterruptible kernel I/O wait may still delay exit; the UI must not claim the
+job is stopped or release its disks while that process remains alive.
+
+Progress, recovery map and an **Interrupted** report are retained in Advanced Disk
+Actions and Activity. Under the unchanged database enum this is a non-success
+`failed` job with an explicit interrupted result and cancellation event, displayed
+as Interrupted rather than an ordinary error. Resume remains a manual recovery
+task. The request accepts a clone job ID and acknowledgement only, never a PID,
+signal or command. Cancellation requests persist across restarts; running jobs
+still become interrupted/failed on agent restart and are never auto-resumed.
+
+The new cancellation route requires the updated agent. The feature updater still
+refuses to interrupt existing running operations; install after current jobs have
+finished, as with previous updates.
+
+## Live output and power acknowledgement
+
+The clone card retains a bounded tail of complete output lines. Carriage-return
+status updates are normalized, partial read chunks wait until their line finishes,
+and old lines are dropped whole. An oversized single line is discarded rather
+than displaying a misleading fragment. The final unterminated line is flushed
+when the process exits. Detailed command logging and map progress are unchanged.
+
+Reboot and shutdown show an additional required checkbox while a clone is queued,
+running or stopping: **I understand there is an ongoing clone and that rebooting
+will cause possible data loss on both disks.** This is in addition to the existing
+job/USB acknowledgement and exact hostname confirmation. The agent validates it
+before inserting a power job and rechecks live clone state immediately before
+scheduling power. Missing/false/string acknowledgements cannot bypass the guard;
+a clone that starts after the dialog opens can cause a stale submission to be
+refused. Refresh the warning dialog in that case.
+
+The normal job queue and 60-second scheduled-power delay remain in effect. This
+acknowledgement is not a new immediate/force-power command or a clone cancellation
+mechanism. Clone startup still refuses a scheduled shutdown/reboot.
+
+## Btrfs snapshot destinations
+
+See [BTRFS Snapshot Server](SNAPSHOT_SERVER.md) for dedicated LAN receive storage,
+restricted SSH accounts and subvolume management. Remove a receiver allocation
+before unmounting, erasing or repurposing its filesystem; removal retains data.
+
+## Deleted partition entries and residual filesystems
+
+Deleting a partition using fdisk removes its table entry, not its filesystem
+contents. Recreating a partition at the old offset can expose the old NTFS/ext4/
+Btrfs signature again. The GPT type shown by fdisk (such as Linux filesystem)
+is independent of the filesystem detected inside it. Ordinary initialization
+refuses existing signatures. The confirmed whole-disk Erase and reinitialize
+operation checks and clears supported residual filesystem signatures from its
+replacement partition before formatting, with identity/use/allocation checks.
+Newly exposed RAID, encryption or partition-table signatures still stop the
+operation.
+
+## Reclaim a disk after cloning
+
+Whole-disk **Erase and reinitialize** can now handle duplicate filesystem UUIDs
+without requiring another clone to be disconnected. Its preview warns about a
+possible completed clone, lists devices sharing the UUID, and requires typing the
+exact selected disk path (for example `/dev/sdd`) **in addition to** the existing
+`FORMAT /dev/sdd` confirmation and data-loss checkbox. The backend verifies both
+confirmations, a five-minute preview, stable hardware identity/kernel generation,
+layout/signatures and duplicate-copy identities before writing. Only the selected
+disk and its partitions are erased; UUID aliases are never used as write targets.
+Mounted/system/busy devices, active RAID and saved storage allocations remain
+protected. Individual partition deletion and mounting still refuse duplicate UUIDs.
+Duplicate Btrfs copies must all be unmounted and verified single-device via native
+superblock inspection; real multi-device Btrfs and unverifiable metadata require
+local handling. Existing RAID reclamation uses its separate RAID acknowledgement.

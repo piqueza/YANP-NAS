@@ -118,6 +118,8 @@ class Backups:
         src = sources[0]
         require(bool(self.db.query("SELECT uuid FROM volumes WHERE uuid=%s", (p["destination_uuid"],))),
                 "Select a previously approved destination volume")
+        from .snapshot_config import unallocated
+        unallocated(self.db,p['destination_uuid']);unallocated(self.db,src['volume_uuid'])
         require(src["volume_uuid"] != p["destination_uuid"], "Choose a different volume for the backup")
         if p["owner_id"] is not None:
             require(bool(self.db.query("SELECT id FROM users WHERE id=%s", (integer(p["owner_id"]),))), "Backup owner not found")

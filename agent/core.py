@@ -56,7 +56,7 @@ def has_sensitive_fields(value):
     """Reject credential fields before queuing/auditing untrusted management data."""
     sensitive = {"password", "passwd", "passphrase", "password_hash", "current_password", "new_password",
                  "db_password", "agent_key", "private_key", "api_key", "access_token", "refresh_token",
-                 "setup_token", "client_secret"}
+                 "setup_token", "client_secret", "control_secret", "enrollment", "enrollment_token", "bootstrap_token"}
     if isinstance(value, dict):
         return any(str(k).lower() in sensitive or has_sensitive_fields(v) for k, v in value.items())
     if isinstance(value, list):
@@ -189,14 +189,16 @@ class Locks:
     def hold(self, *resources):
         import hashlib
         with contextlib.ExitStack() as stack:
+            descriptors=[]
             for resource in sorted(set(resources)):
                 path = self.root / hashlib.sha256(resource.encode()).hexdigest()
                 fd = stack.enter_context(open(path, "a"))
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    descriptors.append(fd.fileno())
                 except BlockingIOError:
                     raise Error("A conflicting operation is already running; retry when it finishes") from None
-            yield
+            yield tuple(descriptors)
 
 
 def json_default(value):

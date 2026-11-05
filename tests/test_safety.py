@@ -140,6 +140,35 @@ class AuthorizationTests(unittest.TestCase):
         self.agent.db.query.side_effect=[[{'id':2,'role':'user','enabled':1}],[]]
         with self.assertRaises(Error): self.agent.authorize('backup.inspect',2,{'id':1})
 
+    def test_power_requires_strict_clone_ack_for_reboot_and_shutdown(self):
+        for action in ('reboot','shutdown'):
+            db=MagicMock();db.query.return_value=[{'id':'test-clone'}]
+            runner=MagicMock();system=System({},db,runner);system.power_warnings=MagicMock(return_value={'clone_active':True})
+            with patch('agent.system.platform.node',return_value='test-nas'):
+                p={'confirmation':action.upper()+' test-nas','warnings_acknowledged':True}
+                for value in (None,False,'true',1):
+                    params=p if value is None else {**p,'clone_acknowledged':value}
+                    with self.assertRaises(Error):system.power(params,action)
+                runner.run.assert_not_called()
+                self.assertEqual(system.power({**p,'clone_acknowledged':True},action)['state'],'Scheduled')
+                self.assertEqual(runner.run.call_args.args[0][0],'shutdown')
+
+    def test_power_rechecks_clone_state_just_before_scheduling(self):
+        db=MagicMock();db.query.side_effect=[[],[{'id':'new-clone'}]]
+        system=System({},db,MagicMock());system.power_warnings=MagicMock(return_value={})
+        with patch('agent.system.platform.node',return_value='test-nas'):
+            with self.assertRaisesRegex(Error,'ongoing clone'):
+                system.power({'confirmation':'REBOOT test-nas','warnings_acknowledged':True},'reboot')
+        system.run.run.assert_not_called()
+
+    def test_power_enqueue_rejects_missing_clone_ack_before_any_job_is_inserted(self):
+        agent=Agent.__new__(Agent);agent.config={};agent.db=MagicMock();agent.ready=MagicMock()
+        agent.db.query.return_value=[{'id':'running-clone'}]
+        with patch('agent.system.platform.node',return_value='test-nas'):
+            with self.assertRaisesRegex(Error,'ongoing clone'):
+                agent.enqueue('system.shutdown',1,{'confirmation':'SHUTDOWN test-nas','warnings_acknowledged':True})
+        agent.db.execute.assert_not_called();agent.ready.put.assert_not_called()
+
     def test_power_requires_exact_hostname_and_acknowledgement(self):
         system=System({},MagicMock(),MagicMock())
         for p in ({'confirmation':'REBOOT','warnings_acknowledged':True}, {'confirmation':'REBOOT host','warnings_acknowledged':False}):

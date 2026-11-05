@@ -204,7 +204,7 @@ class Initializer:
         return {'device':identity(node),'fingerprint':fingerprint(node),'observed_at':int(time.time()),
                 'confirmation':confirmation(node),'filesystem':'ext4','filesystems':list(FORMATTERS),'partition_table':'gpt'}
 
-    def initialize(self, p):
+    def initialize(self, p, *, prepare_partition=None):
         keys(p, ('stable_id','fingerprint','observed_at','confirmation','acknowledge_erase'), ('filesystem',))
         filesystem = filesystem_choice(p.get('filesystem', 'ext4'))
         require(boolean(p['acknowledge_erase']), 'Acknowledge that initialization overwrites disk metadata')
@@ -238,9 +238,15 @@ class Initializer:
                         break
                     require(time.monotonic() < deadline, 'New partition is not visible; inspect the operation log and refresh Storage')
                     time.sleep(.25)
-                require(part.get('type') == 'part' and node['path'] in part.get('physical_disks', [])
+                require(part.get('type') == 'part' and part.get('physical_disks') == [node['path']]
                         and not part.get('protected') and not part.get('ro') and not any(part.get('mountpoints') or [])
-                        and not part.get('fstype') and not part.get('uuid') and part.get('holders') == [], 'New partition is in use or has unexpected contents; formatting refused')
+                        and not part.get('has_children') and part.get('holders') == [], 'New partition is in use or has unexpected contents; formatting refused')
+                if prepare_partition is None:
+                    require(not part.get('fstype') and not part.get('uuid'), 'New partition exposes an existing filesystem; formatting refused. Deleting partition entries with fdisk does not erase their contents. Use the confirmed Erase and reinitialize action to replace this disk.')
+                else:
+                    # Internal callback supplied only by the confirmed whole-disk
+                    # eraser. API payloads cannot opt ordinary initialization in.
+                    prepare_partition(node,part,partition,verify)
                 self.run.log('Step 2 of 2: Formatting and verifying the new partition.\n')
                 fs_uuid = self.make_filesystem(node, part, partition, filesystem, verify)
             except Exception as exc:
