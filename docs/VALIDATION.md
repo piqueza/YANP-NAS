@@ -1,4 +1,64 @@
+## Other-device snapshot recovery packages, 7 November 2026
+
+Tests cover administrator-only downloads, active-lease and platform validation,
+ZIP contents/private permissions, credential exclusion from audit and ordinary
+web views, original-client-independent recovery, and platform selection in the
+frontend. The generated Linux script runs against a mocked Gio desktop backend;
+the Windows script is parsed by PowerShell and its mapping logic runs with mocked
+Windows drive APIs. No real desktop mount or Windows network drive was created.
+The full local suite and isolated API integration suite are run for this build.
+
+Target acceptance: mount from a Linux desktop and Windows normal user, copy a
+file out, verify writes fail, disconnect each extra device, and close from YANP.
+Repeat with the original client offline using Other device only. Confirm other
+snapshot trees keep transferring, the permitted LAN is enforced, and closed
+packages no longer authenticate. Windows policy and Linux desktop dependencies
+are documented in each ZIP; no global policy bypass or credential-store changes
+are made. Original client unmount still closes a client-linked share; extra-device
+unmount only disconnects that viewer. No real NAS or client was accessed here.
+
 # Validation and target-server acceptance
+
+## Read-only snapshot browsing, 7 November 2026
+
+The build passes **426 local checks** (427 tests; root/systemd APT check skipped,
+loopback TLS tested separately) and **63 isolated integration checks**. Seventeen
+new browse tests cover private credential delivery/redacted views, local account
+and capability checks, client/tree-specific pause and inherited receive locks,
+mounting despite unrelated storage/tree locks, readonly host-namespace bind/CIFS
+command construction, native Samba config acceptance, mount identity refusal,
+close/manual-unmount handling, credentials cleanup, acknowledgement-based resume,
+and avoiding repeated completed-job/state writes. Native setup releases the
+client metadata lock between short writes, merges other-tree progress and respects
+a concurrent close request. Samba configuration writes serialize independently
+of long snapshot transfers. Host mount polling uses PID 1 mountinfo directly,
+without spawning transient query services. A control roundtrip test verifies the
+password travels only through the authenticated recipient poll and disappears
+from close instructions. Frontend tests and a synthetic browser fixture verify
+active-account selection, the scoped pause notice, mounted path prompt, aligned
+buttons and restoration of the action after close. The fixture has no real disk,
+account, Samba or mount mutations.
+
+Native bind/CIFS mounting and host-namespace propagation still need target
+acceptance. No live NAS/client was accessed or updated. On the test NAS/client:
+verify an original snapshot file is readable through the CIFS mount and a write
+fails, observe no copied subvolume, check temporary shares reject other users and
+other LANs, and confirm a receive into another tree/client does not delay opening
+this view. The same-tree receive must finish first and new uploads to that tree
+must pause while other trees continue. Test closing from YANP, manual client
+unmount, busy client file handles, client offline/reconnect, NAS/client restart,
+failed setup/cleanup, and retention while a mount is active. Confirm generated
+accounts, native mount aliases and credential files disappear after closure,
+and operation/audit/web responses contain no private share password. This first
+draft allows one view per client, with other clients independent.
+
+Update the NAS before clients. Existing clients need cifs-utils installed locally;
+new installers check for it. Automatic client script updates remain deferred while
+a recovery mount is open. Mounts use transient system services because both agents
+have private mount namespaces. Native Samba configuration was checked with
+`testparm`; kernel CIFS behavior was mocked rather than claimed as an end-to-end
+success. Receiver configuration revocation requests share closure, and cleanup
+runs independently of whether the TLS listener can start.
 
 ## Feature updater latency diagnostics, 7 November 2026
 

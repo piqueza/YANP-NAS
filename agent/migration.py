@@ -167,8 +167,8 @@ class Migration:
         keys(p,('acknowledge_sensitive',))
         require(p['acknowledge_sensitive'] is True,'Acknowledge that this package contains web and Samba password-equivalent credentials')
         require(isinstance(self.run.job_id,str) and re.fullmatch('[a-f0-9]{32}',self.run.job_id),'A persistent export job is required')
-        from .snapshot_browse import uploads_paused
-        require(not uploads_paused(self.config),'Close snapshot browsing mounts before exporting system state')
+        from .snapshot_browse import any_views_open
+        require(not any_views_open(self.config),'Close snapshot browsing mounts before exporting system state')
         data=snapshot(self.db);samba=samba_snapshot(data)
         from .snapshot_control import ClientControl
         managed=ClientControl(self.config,self.db,None).migration_records()

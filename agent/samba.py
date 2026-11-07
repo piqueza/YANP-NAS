@@ -3,9 +3,13 @@ import os
 from pathlib import Path
 import pwd
 import tempfile
+import threading
 
 from .core import atomic_write, boolean, integer, keys, label, require, username
 from .devices import uuid_value
+
+
+_CONFIGURATION_LOCK=threading.RLock()
 
 
 class Samba:
@@ -38,6 +42,10 @@ class Samba:
         return "\n".join(lines) + "\n"
 
     def apply(self,disconnect=True):
+        with _CONFIGURATION_LOCK:
+            return self._apply(disconnect)
+
+    def _apply(self,disconnect=True):
         content = self.render()
         main = self.main.read_text()
         require(str(self.path) in main, "Install the managed include in smb.conf before managing shares")

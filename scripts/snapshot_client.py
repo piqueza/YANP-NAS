@@ -85,7 +85,7 @@ def local_browse_users():
     try:
         for line in command(['loginctl','list-sessions','--no-legend','--no-pager'],timeout=3).splitlines()[:64]:
             fields=line.split()
-            if len(fields)>=3 and fields[1].isdecimal() and command(['loginctl','show-session',fields[0],'--property=Active','--value'],timeout=3).strip()=='yes':active.add(int(fields[1]))
+            if len(fields)>=4 and fields[1].isdecimal() and fields[3].startswith('seat') and command(['loginctl','show-session',fields[0],'--property=Active','--value'],timeout=3).strip()=='yes':active.add(int(fields[1]))
     except Exception:pass  # Headless clients still offer their ordinary local accounts.
     users=[{'uid':u.pw_uid,'gid':u.pw_gid,'name':u.pw_name,'active':u.pw_uid in active} for u in pwd.getpwall()
            if 1000<=u.pw_uid<=60000 and u.pw_gid>0 and re.fullmatch(r'[A-Za-z0-9_.-]{1,64}',u.pw_name) and u.pw_shell not in ('/usr/sbin/nologin','/sbin/nologin','/bin/false') and Path(u.pw_dir).is_dir()]
@@ -703,7 +703,7 @@ class Client:
                         '--property=RuntimeMaxSec=90s','--',*args],timeout=100,allowed=allowed)
 
     def browse_mount(self,view):
-        raw=self.browse_host(view['id'],'query',['/usr/bin/findmnt','--json','--mountpoint',view['path'],'--output','SOURCE,TARGET,FSTYPE,OPTIONS'],(0,1))
+        raw=command(['/usr/bin/findmnt','--task','1','--nocanonicalize','--json','--mountpoint',view['path'],'--output','SOURCE,TARGET,FSTYPE,OPTIONS'],timeout=10,allowed=(0,1))
         if not raw.strip():return None
         mounts=json.loads(raw)['filesystems'];check(len(mounts)==1,'Ambiguous snapshot mountpoint')
         mounted=mounts[0];spec=view['spec'];host='['+spec['host']+']' if ':' in spec['host'] else spec['host']
@@ -733,7 +733,7 @@ class Client:
         # A root-only file, never process arguments, environment or reports.
         atomic(credential,'username='+desired['username']+'\npassword='+desired['password']+'\n',text=True)
         host='['+desired['host']+']' if ':' in desired['host'] else desired['host']
-        options=f"credentials={credential},ro,nosuid,nodev,noexec,vers=3.1.1,seal,uid={desired['uid']},gid={desired['gid']},forceuid,forcegid,file_mode=0400,dir_mode=0500"
+        options=f"credentials={credential},ro,nosuid,nodev,noexec,vers=3.1.1,seal,uid={desired['uid']},gid={desired['gid']},forceuid,forcegid,nounix,file_mode=0400,dir_mode=0500"
         self.browse_host(view['id'],'mount',[shutil.which('mount.cifs'), '//'+host+'/'+desired['share'],view['path'],'-o',options])
 
     def browse_tick(self):
@@ -757,8 +757,9 @@ class Client:
                     with self.lock:self.state['browse']=view;self.save()
                 mounted=self.browse_mount(view)
                 if mounted:
-                    view.update(state='mounted',had_mounted=True)
-                    with self.lock:self.state['browse']=view;self.save()
+                    if view['state']!='mounted' or not view.get('had_mounted'):
+                        view.update(state='mounted',had_mounted=True)
+                        with self.lock:self.state['browse']=view;self.save()
                     return
                 if view.get('had_mounted'):
                     self.browse_cleanup(view);return  # Operator unmounted it on the host.

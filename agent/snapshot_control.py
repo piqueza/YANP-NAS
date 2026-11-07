@@ -134,6 +134,7 @@ def validate_report(report):
         view=report['browse'];keys(view,('id','state'),('path','error'))
         require(isinstance(view['id'],str) and re.fullmatch(r'[a-f0-9]{32}',view['id']),'Invalid view ID')
         require(view['state'] in ('mounting','mounted','closed','failed'),'Invalid client mount state')
+        require(view['state']!='mounted' or view.get('path')=='/mnt/yanp-snapshots/'+view['id'],'Mounted snapshots must report their client mountpoint')
         if 'path' in view:require(view['path']=='/mnt/yanp-snapshots/'+view['id'],'Invalid client snapshot mountpoint')
         if 'error' in view:require(isinstance(view['error'],str) and len(view['error'])<=1000,'Invalid mount error')
     sizes=report.get('sizes',{})
@@ -608,5 +609,4 @@ def start_listener(config,db,locks):
         threading.Thread(target=server.serve_forever,daemon=True,name='snapshot-client-control').start()
         threading.Thread(target=server.control.retention_loop,daemon=True,name='snapshot-server-retention').start()
         threading.Thread(target=server.control.snapshot_size_loop,daemon=True,name='snapshot-size-estimates').start();
-        from .snapshot_browse import SnapshotBrowse
-        threading.Thread(target=SnapshotBrowse(config,db,locks).loop,daemon=True,name='snapshot-browsing').start();_LISTENER=server
+        _LISTENER=server

@@ -18,8 +18,13 @@ assert.match(run("snapshotBrowseActions(c,'source','snapshot')"),/Mount snapshot
  context.form={dataset:{form:'snapshot-browse'},values:{account:'ynpsnap_test',source:'source',snapshot:'snapshot',uid:'1001'},elements:{}};
  await run('submit(form)');assert.equal(run('calls[0].op'),'snapshot.browse_open');assert.equal(run('calls[0].p.uid'),1001);
  run("c.browse={id:'abc',source:'source',snapshot:'snapshot',state:'mounted',client_state:'mounted',client_path:'/mnt/yanp-snapshots/abc',local_user:'desktop'}");
- const mounted=run("snapshotBrowseActions(c,'source','snapshot')");assert.match(mounted,/SNAPSHOT MOUNTED/);assert.match(mounted,/file explorer/);assert.match(mounted,/Close snapshot share/);
+ const mounted=run("snapshotBrowseActions(c,'source','snapshot')");assert.match(mounted,/SNAPSHOT MOUNTED/);assert.match(mounted,/file explorer/);assert.match(mounted,/Close snapshot share/);assert.match(mounted,/Download mount script for other device/);
+ await run("clickAction({dataset:{action:'snapshot-browse-download',account:'ynpsnap_test',id:'abc'}})");assert.match(run('html'),/Download Linux ZIP/);assert.match(run('html'),/Download Windows ZIP/);assert.match(run('html'),/temporary share password/);
+ run("c.browse.state='closing'");assert.ok(!run("snapshotBrowseActions(c,'source','snapshot')").includes('Download mount script'));
+ run("c.browse.state='mounted'");
  await run("clickAction({dataset:{action:'snapshot-browse-close',account:'ynpsnap_test',id:'abc'}})");assert.equal(run('calls[1].op'),'snapshot.browse_close');
+ run("c.report={};c.browse=null");await run("clickAction({dataset:{action:'snapshot-browse-open',account:'ynpsnap_test',source:'source',snapshot:'snapshot'}})");assert.match(run('html'),/Other device only/);assert.match(run('html'),/name="external_only"[^>]*checked/);
+ context.form.values={account:'ynpsnap_test',source:'source',snapshot:'snapshot',external_only:'on'};await run('submit(form)');assert.equal(run('calls[2].p.external_only'),true);assert.ok(!('uid' in run('calls[2].p')));
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """)
 

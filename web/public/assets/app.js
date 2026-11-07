@@ -290,11 +290,12 @@ function snapshotBrowseActions(c,key,snapshot) {
   const attrs=`data-account="${esc(c.account)}" data-source="${esc(key)}" data-snapshot="${esc(snapshot)}"`;
   let mount;
   if(same) {
-    const ready=view.state==='mounted'&&view.client_state==='mounted';
+    const ready=view.state==='mounted'&&(view.external_only||view.client_state==='mounted');
     mount=btn(ready?'SNAPSHOT MOUNTED':view.state==='closing'?'Closing snapshot mount…':'Waiting for snapshot mount…','snapshot-browse-location',attrs)+
-      (ready?`<small>Open <code>${esc(view.client_path)}</code> in your computer's file explorer.</small>`:'')+
+      (ready&&!view.external_only?`<small>Open <code>${esc(view.client_path)}</code> in your computer's file explorer.</small>`:'')+
+      (ready?btn('Download mount script for other device','snapshot-browse-download',`data-account="${esc(c.account)}" data-id="${esc(view.id)}"`,'quiet'):'')+
       btn('Close snapshot share','snapshot-browse-close',`data-account="${esc(c.account)}" data-id="${esc(view.id)}" ${view.state==='closing'?'disabled':''}`,'quiet');
-  } else mount=btn('Mount snapshot and share with client','snapshot-browse-open',attrs+` ${open||c.report?.agent?.browse_cifs!==1||!c.report?.browse_users?.length?'disabled':''}`);
+  } else mount=btn('Mount snapshot and share with client','snapshot-browse-open',attrs+` ${open?'disabled':''}`);
   return `<div class="snapshot-actions">${btn('Return snapshot to client','snapshot-return',attrs)}${mount}</div>`;
 }
 function snapshotGroup(c,key,scope,title,local=false) {
@@ -419,16 +420,24 @@ async function enter(u) {
 }
 
 async function clickAction(button) {
+  if(button.dataset.action==='snapshot-browse-download') {
+    return dialog('Download mount script for other device',`<p>Open this read-only snapshot on another laptop or PC. Extract the ZIP and follow its README as your normal user.</p><p class="notice warning">This private package contains a temporary share password. Keep it private and delete it when finished. The device must be on the permitted client LAN. Closing this share in YANP or unmounting on the original client disconnects every recovery device.</p><p>Linux uses desktop SMB/GVfs (Python 3, PyGObject and GVfs SMB support required). Windows uses built-in PowerShell and SMB drive mapping. Neither script needs administrator privileges to mount.</p>`+btn('Download Linux ZIP','snapshot-browse-package',`data-account="${esc(button.dataset.account)}" data-id="${esc(button.dataset.id)}" data-platform="linux"`)+btn('Download Windows ZIP','snapshot-browse-package',`data-account="${esc(button.dataset.account)}" data-id="${esc(button.dataset.id)}" data-platform="windows"`),null,'OK');
+  }
+  if(button.dataset.action==='snapshot-browse-package') {
+    const result=await api('action',{operation:'snapshot.browse_download',params:{account:button.dataset.account,id:button.dataset.id,platform:button.dataset.platform}});
+    const blob=new Blob([Uint8Array.from(atob(result.base64),c=>c.charCodeAt(0))],{type:'application/zip'}),url=URL.createObjectURL(blob),link=document.createElement('a');
+    link.href=url;link.download=result.filename;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);return;
+  }
   if(button.dataset.action==='snapshot-browse-close')return action('snapshot.browse_close',{account:button.dataset.account,id:button.dataset.id});
   if(button.dataset.action==='snapshot-browse-location') {
     const v=snapshotDetail?.browse;if(!v)return;
-    return dialog('Snapshot mount',`<p>${v.state==='mounted'?'Open this location in your client computer’s file explorer:':'The snapshot mount is '+esc(v.state.replaceAll('_',' '))+'.'}</p>${v.client_path?`<p><code>${esc(v.client_path)}</code></p>`:''}<p>Local account: ${esc(v.local_user)}. The snapshot is read-only.</p>`);
+    return dialog('Snapshot mount',`<p>${v.state==='mounted'?'Open this location in your client computer’s file explorer:':'The snapshot mount is '+esc(v.state.replaceAll('_',' '))+'.'}</p>${v.client_path?`<p><code>${esc(v.client_path)}</code></p>`:''}<p>${v.external_only?'Download a mount script to open it on another computer.':'Local account: '+esc(v.local_user)+'.'} The snapshot is read-only.</p>`);
   }
   if(button.dataset.action==='snapshot-browse-open') {
     const c=snapshotDetail;if(!c||c.account!==button.dataset.account)return;
-    const users=c.report?.browse_users||[];if(!users.length)throw Error('Reconnect/update the client to report local accounts.');
+    const users=c.report?.browse_users||[],available=c.report?.agent?.browse_cifs===1&&users.length;
     const selected=users.find(u=>u.active)||users[0];
-    return dialog('Mount snapshot and share with client',`<p><strong>${esc(button.dataset.snapshot)}</strong></p><p>Open this snapshot directly through a temporary read-only CIFS mount. No snapshot data is copied.</p><p class="notice warning">Uploads for this snapshot tree will pause until the share is closed. Only a running transfer of this tree delays mounting. Other volumes and clients continue normally.</p>`+field('Client','account','hidden',c.account)+field('Source','source','hidden',button.dataset.source)+field('Snapshot','snapshot','hidden',button.dataset.snapshot)+select('Local client account','uid',users.map(u=>[u.uid,u.name+(u.active?' (active desktop session)':'')]),selected.uid,'required')+'<p>Share credentials are sent privately to the client agent. Close from here or unmount on the client to release the share.</p>','snapshot-browse','Mount read-only snapshot');
+    return dialog('Mount snapshot and share with client',`<p><strong>${esc(button.dataset.snapshot)}</strong></p><p>Open this snapshot directly through a temporary read-only network share. No snapshot data is copied.</p><p class="notice warning">Uploads for this snapshot tree will pause until the share is closed. Only a running transfer of this tree delays mounting. Other volumes and clients continue normally.</p>`+field('Client','account','hidden',c.account)+field('Source','source','hidden',button.dataset.source)+field('Snapshot','snapshot','hidden',button.dataset.snapshot)+check('Other device only — original client is unavailable or not needed','external_only',!available)+(available?select('Local client account (when mounting on original client)','uid',users.map(u=>[u.uid,u.name+(u.active?' (active desktop session)':'')]),selected.uid,'required'):'')+'<p>Other device only opens the NAS share without contacting the original computer. Once ready, download a mount script here. Close this share from YANP when finished.</p>','snapshot-browse','Mount read-only snapshot');
   }
   if(button.dataset.action==='snapshot-client-measure')return action('snapshot.client_command',{account:button.dataset.account,kind:'refresh_sizes',source:button.dataset.source});
   if(button.dataset.action==='snapshot-measure')return action('snapshot.measure',{account:button.dataset.account,source:button.dataset.source});
@@ -678,7 +687,7 @@ async function browseBackup(id,snapshot='',path='') {
 async function submit(form) {
   const p=Object.fromEntries(new FormData(form)), type=form.dataset.form;
   const checked=name=>!!form.elements[name]?.checked;
-  if(type==='snapshot-browse'){await action('snapshot.browse_open',{account:p.account,source:p.source,snapshot:p.snapshot,uid:Number(p.uid)});closeDialog(true);return;}
+  if(type==='snapshot-browse'){await action('snapshot.browse_open',{account:p.account,source:p.source,snapshot:p.snapshot,...(p.external_only?{external_only:true}:{uid:Number(p.uid)})});closeDialog(true);return;}
   if(type==='snapshot-update') {await action('snapshot.client_update',{account:p.account,enabled:checked('enabled')});return;}
   if(type==='snapshot-policy') {
     await action('snapshot.client_policy',{account:p.account,source:p.source,policy:{enabled:checked('enabled'),interval_minutes:Number(p.interval_minutes),client_keep:Number(p.client_keep),server_keep:Number(p.server_keep)}});closeDialog(true);return;

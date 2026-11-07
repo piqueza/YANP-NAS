@@ -1,6 +1,65 @@
 # Changelog
 
-## 0.2.0 — 2026-11-05
+## 0.2.0 — 2026-11-07
+
+- Download temporary read-only snapshot mount packages for other Linux desktops
+  and Windows PCs. Offer platform choices after mounting, use desktop Gio/SMB
+  or built-in PowerShell drive mapping without elevation, and include disconnect
+  commands. Packages contain only current recovery share credentials, expire
+  with the share, and remain restricted to its existing permitted LAN. Allow
+  opening a share without the original client for recovery after a machine fails.
+
+- Add temporary read-only snapshot browsing through a direct Btrfs bind mount,
+  private encrypted Samba share and recipient-bound client CIFS mount. Select a
+  reported local account (active desktop by default), show mounted status/path,
+  and close from YANP or detect a client unmount. Pause uploads and wait for an
+  active receive only for the selected client/source tree; other trees continue.
+  Protect shared snapshots from retention and keep credentials out of web views,
+  audit/job parameters and process arguments. Use host-namespace system services
+  so mounts are visible to Samba and the client file explorer.
+
+- Give Advanced Disk Actions its own inline SVG icon: a tilted disk above a drive
+  with an upright rope climber at the upper right ascending from right to left,
+  matching
+  the sidebar's square dimensions and theme colour.
+
+- Avoid unconditional APT refresh/install during feature updates when all required
+  packages are installed. Keep an explicit --refresh-packages option and print
+  elapsed times for database checks, file copies, service commands and startup
+  verification to diagnose slow updates without exposing configuration or SQL.
+
+- Keep completed snapshot estimates until manual refresh, indexing only new native
+  snapshot identities automatically. Retain dated group totals across additions,
+  retention and failed refreshes; mark changed groups rather than summing shared
+  data twice. Add capability-gated manual client size refresh and preserve existing
+  figures while scanning. Successful snapshot estimates no longer expire hourly.
+
+- Allow NAS snapshot storage scans up to one hour instead of five minutes, keeping
+  nice 19/idle I/O priority. Explain the longer scan in the storage card and prevent
+  duplicate refresh submissions while an automatic group scan is already running.
+  Client and source scan limits are unchanged.
+
+- Preserve snapshot size scan failure reasons in the storage cards and client
+  reports. Log manual refresh commands/output in Activity and mark failed scans
+  as failed operations instead of successful refreshes with unavailable figures.
+  Retry older undiagnosed failures after updating, with the existing low-priority
+  scan limits and retry backoff retained.
+
+- Offer full or incremental snapshot returns with recently reported compatible
+  read-only client parents, native identity rechecks, parent retention pins,
+  private staged reconstruction and no automatic full-transfer fallback. Show
+  full-content estimates separately from unshared footprint when available.
+
+- Give BTRFS Snapshot Server a dedicated three-block, logo-inspired inline SVG
+  sidebar icon matching the existing icon dimensions, stroke and theme colours.
+
+- Label individual snapshot estimates as unshared data and use Btrfs Exclusive
+  bytes, retaining shared data in group totals. Invalidate older referenced-data
+  caches instead of relabelling full snapshot contents as individual footprint.
+
+- Run source and snapshot usage scans at CPU nice 19 and idle I/O priority on
+  clients, and snapshot scans at the same priority on the NAS. Keep networking and
+  snapshot transfers at their existing priority; refuse unprioritised fallback.
 
 - Wait for NAS catalogue confirmation after a completed client upload instead of
   starting another full send during the polling gap. Remove silent full fallback

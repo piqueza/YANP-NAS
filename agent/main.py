@@ -44,7 +44,7 @@ OPERATIONS = {
     "system.updates", "system.install", "system.reboot", "system.shutdown", "firewall.change",
     "fail2ban.ban", "fail2ban.unban", "fail2ban.configure", "account.state", "system.service",
 }
-READS = {"snapshot.client_view","snapshot.client_installer","snapshot.candidates","snapshot.inspect","storage.clone_plan","storage.signatures", "storage.reinitialize_plan", "storage.delete_partition_plan", "storage.browse", "state", "job.read", "backup.inspect", "system.warnings", "firewall.status", "fail2ban.status", "storage.initialize_plan", "storage.format_plan"}
+READS = {"snapshot.browse_download","snapshot.client_view","snapshot.client_installer","snapshot.candidates","snapshot.inspect","storage.clone_plan","storage.signatures", "storage.reinitialize_plan", "storage.delete_partition_plan", "storage.browse", "state", "job.read", "backup.inspect", "system.warnings", "firewall.status", "fail2ban.status", "storage.initialize_plan", "storage.format_plan"}
 SYNC = {"snapshot.browse_open","snapshot.browse_close","snapshot.client_update","snapshot.client_policy","snapshot.client_command","storage.clone_cancel","account.sync", "firewall.confirm", "monitoring.save", "event.ack", "event.ack_all"}
 
 
@@ -65,6 +65,8 @@ class Agent:
                 from .snapshot_control import start_listener
                 try:start_listener(self.config,self.db,self.locks)
                 except Exception:logging.error('Snapshot control listener unavailable; check TLS configuration and port 9444')
+            from .snapshot_browse import SnapshotBrowse
+            threading.Thread(target=SnapshotBrowse(self.config,self.db,self.locks).loop,daemon=True,name="snapshot-browsing").start()
             self.firewall.recover()
             threading.Thread(target=self.worker, daemon=True, name="job-worker").start()
             threading.Thread(target=self.rollback_loop, daemon=True, name="firewall-rollback").start()
@@ -94,6 +96,9 @@ class Agent:
     def request(self, op, actor, params, root=False):
         user = self.authorize(op, actor, params, root)
         runner = Runner()
+        if op=='snapshot.browse_download':
+            from .snapshot_browse import SnapshotBrowse
+            return SnapshotBrowse(self.config,self.db,self.locks).mount_package(params,actor)
         if op in ('snapshot.browse_open','snapshot.browse_close'):
             from .snapshot_browse import SnapshotBrowse
             require(isinstance(params,dict) and not has_sensitive_fields(params),'Invalid snapshot browsing parameters')

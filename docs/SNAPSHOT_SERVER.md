@@ -568,7 +568,8 @@ enrolled client's pinned-TLS control channel. Web views, audit/job parameters
 and status reports exclude it. The client writes a mode-0600 credentials file;
 passwords do not appear in process arguments. Its CIFS mount requests SMB 3.1.1
 with encryption, `ro,nosuid,nodev,noexec`, forced UID/GID mapping to the selected
-local account and owner-only file/directory permissions. Mount helpers run as
+local account and owner-only file/directory permissions (`nounix` keeps those
+client permissions independent of the original snapshot ownership/modes). Mount helpers run as
 transient system services in the host mount namespace, because mounting inside
 the private agent namespace would hide the mount from Samba or the desktop.
 
@@ -609,3 +610,29 @@ relying on it for file recovery; the automated checks use isolated/mock mounts.
 
 References: [systemd-run](https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html)
 and [Linux CIFS usage](https://docs.kernel.org/admin-guide/cifs/usage.html).
+
+### Open a recovery snapshot from another computer
+
+After the snapshot shows **SNAPSHOT MOUNTED**, choose **Download mount script for
+other device** and select Linux or Windows. Extract the private ZIP and follow
+its README. It contains credentials for this read-only recovery share, not a
+client control token, SSH key or administrator password. Keep it private, share
+only with the technician, and delete the package and extracted folder afterward.
+
+Linux runs `python3 mount.py` in the logged-in desktop session using
+PyGObject/Gio and the GVfs SMB backend (`python3-gi`, `gvfs-backends` on Debian).
+This unprivileged desktop SMB mount is distinct from the original managed
+client's kernel CIFS mount. Disconnect with `python3 mount.py --unmount`.
+Windows uses `.\mount.ps1` in normal Windows PowerShell and built-in SMB mapping;
+disconnect with `.\mount.ps1 -Unmount`. No machine-wide execution policy changes
+are made. Administrator installation of missing Linux desktop packages or local
+Windows policy approval may be necessary before first use.
+
+The other computer must reach TCP 445 from the existing permitted client LAN;
+this download does not widen firewall or share access. The original client agent
+is not installed on the technician computer. If the original machine is unavailable, select **Other device only** when
+opening the recovery share. This opens the NAS share without contacting that
+computer; close it in YANP when finished. Downloads reuse the open share. Closing
+it in YANP or unmounting on the original client revokes all recovery connections.
+Disconnecting an additional computer only removes its own mount, leaving the
+share open for other viewers. Only the selected tree's uploads remain paused.
