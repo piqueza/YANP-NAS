@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent.core import Locks
-from agent.snapshot_control import ClientControl,ControlServer,digest
+from agent.snapshot_control import ClientControl,ControlServer,digest,MAX_CONTROL_REQUEST
 from scripts.snapshot_client import Transport,ClientError
 from tests.test_snapshot_server import database,record,destination
 from tests.test_snapshot_control import inventory
@@ -62,7 +62,7 @@ class ControlTlsTests(unittest.TestCase):
                 response=connection.getresponse();body=response.read().decode();self.assertEqual(response.status,403);connection.close()
                 for private in (bootstrap,secret,digest(secret),record()['public_key']):self.assertNotIn(private,body)
                 connection=original('127.0.0.1',port,context=ctx,timeout=5)
-                connection.request('POST','/poll','{}',{'Content-Type':'application/json','Content-Length':'131073','Authorization':'Bearer '+secret})
+                connection.request('POST','/poll','{}',{'Content-Type':'application/json','Content-Length':str(MAX_CONTROL_REQUEST+1),'Authorization':'Bearer '+secret})
                 try:
                     response=connection.getresponse();self.assertEqual(response.status,403);response.read()
                 except (ConnectionResetError,http.client.RemoteDisconnected):pass  # Rejected before consuming an oversized body.

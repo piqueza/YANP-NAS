@@ -1231,3 +1231,57 @@ input[readonly] {
 .client-update-notice .form-error {color:var(--bad)}
 .client-update-notice .row {flex-wrap:wrap}
 .client-update-notice .grow {min-width:220px;overflow-wrap:anywhere}
+
+.snapshot-destination {padding:20px 22px;border-bottom:1px solid var(--border)}
+.snapshot-destination:last-child {border-bottom:0}
+.snapshot-destination-header,.snapshot-client-summary {
+  display:grid;
+  grid-template-columns:minmax(0,320px) 332px minmax(0,1fr);
+  gap:20px;
+  align-items:center;
+}
+.snapshot-destination-header {margin-bottom:14px;padding:0 23px}
+.snapshot-client-summary {padding:20px 22px}
+.snapshot-client-identity {min-width:0;overflow-wrap:anywhere}
+.snapshot-client-identity h3,.snapshot-client-identity p {margin:0}
+.snapshot-client-identity small,.snapshot-client-identity p {display:block;margin-top:5px;color:var(--muted);font-size:11px}
+button.snapshot-client-name {padding:0;border:0;text-align:left;white-space:normal}
+.snapshot-client-actions {display:grid;grid-template-columns:150px 170px;gap:12px;align-items:center}
+.snapshot-client-actions button {margin:0;width:100%;white-space:normal;font-size:12px}
+.snapshot-client-actions .danger-text {grid-column:2}
+.snapshot-managed-client {margin-bottom:14px}
+.snapshot-managed-client:last-child {margin-bottom:0}
+.snapshot-client-status {justify-self:end;min-width:0;max-width:100%}
+.snapshot-client-status .badge {white-space:normal;overflow-wrap:anywhere}
+@media(max-width:1100px) {
+  .snapshot-destination-header,.snapshot-client-summary {grid-template-columns:minmax(0,1fr) auto}
+  .snapshot-client-identity {grid-column:1;grid-row:1}
+  .snapshot-client-status {grid-column:2;grid-row:1}
+  .snapshot-client-actions {grid-column:1/-1;grid-row:2;grid-template-columns:repeat(2,minmax(0,155px))}
+}
+@media(max-width:540px) {
+  .snapshot-destination {padding:16px 12px}
+  .snapshot-destination-header {padding:0 13px}
+  .snapshot-client-summary {padding:16px 12px;gap:14px 8px}
+  .snapshot-client-status {max-width:110px;text-align:right}
+}
+
+.snapshot-group {margin:16px;border:1px solid var(--border);border-radius:9px;overflow:hidden}
+.snapshot-group>summary {display:flex;align-items:center;gap:12px;justify-content:space-between;padding:16px;cursor:pointer;list-style:none}
+.snapshot-group>summary::-webkit-details-marker {display:none}
+.snapshot-group>summary::before {content:'▸';color:var(--accent)}
+.snapshot-group[open]>summary::before {content:'▾'}
+.snapshot-group>summary>span:first-of-type {flex:1;min-width:0;overflow-wrap:anywhere}
+.snapshot-group[open]>summary {border-bottom:1px solid var(--border)}
+.snapshot-group-content>p,.snapshot-group-content>button {margin:16px}
+.snapshot-group-content .row {padding:16px}
+.snapshot-group-content .grow {min-width:0;overflow-wrap:anywhere}
+.snapshot-group summary:focus-visible {outline:2px solid var(--accent);outline-offset:-3px}
+
+/* Keep snapshot return and temporary mount controls together at narrow widths. */
+.snapshot-group-content>.row{flex-wrap:wrap}
+.snapshot-group-content>.row>.grow{flex:1 1 16rem}
+.snapshot-actions{display:flex;flex:1 1 16rem;flex-direction:column;align-items:stretch;gap:.55rem;max-width:22rem;min-width:0;margin-left:auto}
+.snapshot-actions button{width:100%;margin:0;white-space:normal}
+.snapshot-actions small{overflow-wrap:anywhere}
+@media(max-width:700px){.snapshot-actions{width:100%;max-width:none;flex-shrink:1}}

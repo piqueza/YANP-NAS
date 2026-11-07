@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Managed per-source native streams, catalogues and verified server retention."""
 import json
+import contextlib
 import os
 import secrets
 import signal
@@ -10,7 +11,7 @@ import uuid
 
 from .core import Runner,require
 from .devices import open_directory
-from .snapshot_control import ClientControl,source_id,managed_snapshot
+from .snapshot_control import ClientControl,source_id,managed_snapshot,restore_pins
 
 
 def info(run,fd):
@@ -86,6 +87,7 @@ def transfer(config,db,locks,server,row,spec,descriptors):
     if operation=='receive':require(str(uuid.UUID(spec['snapshot_uuid']))==spec['snapshot_uuid'].lower(),'Invalid snapshot UUID')
     root,control,meta,state=source_root(config,db,locks,server,row,source,operation=='receive')
     fd=open_directory(root);process=None;ident=secrets.token_hex(16);runner=Runner(db,ident);params={'account':row['account'],'source':source,'snapshot':name,**process_identity()}
+    if operation=='send':params.update(mode='incremental' if spec.get('parent') else 'full',parent=spec.get('parent'))
     job_operation='snapshot.receive' if operation=='receive' else 'snapshot.send'
     db.execute("INSERT INTO jobs(id,operation,params,status,started_at) VALUES(%s,%s,%s,'running',UTC_TIMESTAMP())",(ident,job_operation,json.dumps(params)))
     try:
@@ -118,13 +120,22 @@ def transfer(config,db,locks,server,row,spec,descriptors):
         else:
             snap=next((s for s in state['snapshots'] if s['name']==name),None)
             require(snap is not None,'Server snapshot not found')
-            child=open_directory(root,(name,))
-            try:
+            with contextlib.ExitStack() as stack:
+                child=open_directory(root,(name,));stack.callback(os.close,child)
                 data=info(runner,child)
                 require(data['read_only'] and data['id']==snap['id'] and data['uuid']==snap['uuid'],'Server snapshot identity changed')
-                process=subprocess.Popen(['btrfs','send',f'/proc/self/fd/{child}'],stdin=subprocess.DEVNULL,stdout=1,stderr=subprocess.PIPE,
-                                         start_new_session=True,pass_fds=(*descriptors,child),env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'})
-            finally:os.close(child)
+                send=['btrfs','send'];fds=[*descriptors,child]
+                if spec.get('parent'):
+                    parent_name=managed_snapshot(spec['parent']);require(parent_name!=name,'Incremental parent must differ from target')
+                    parent=next((s for s in state['snapshots'] if s['name']==parent_name),None)
+                    require(parent is not None and (parent['created_at'],parent['id'])<(snap['created_at'],snap['id']),'Incremental parent is unavailable or not older than target')
+                    parent_fd=open_directory(root,(parent_name,));stack.callback(os.close,parent_fd);parent_info=info(runner,parent_fd)
+                    require(parent_info['read_only'] and parent_info['id']==parent['id'] and parent_info['uuid']==parent['uuid'] and parent_info['received_uuid']==parent['received_uuid'],'Server incremental parent identity changed')
+                    send+=['-p',f'/proc/self/fd/{parent_fd}'];fds.append(parent_fd)
+                send.append(f'/proc/self/fd/{child}')
+                runner.log('Snapshot return mode: '+params['mode']+('; parent '+spec['parent'] if spec.get('parent') else '')+'\n')
+                process=subprocess.Popen(send,stdin=subprocess.DEVNULL,stdout=1,stderr=subprocess.PIPE,
+                                         start_new_session=True,pass_fds=tuple(fds),env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'})
         if process is not None:
             try:
                 child_identity=process_identity(process.pid);params.update(child_pid=process.pid,child_start=child_identity['receiver_start'])
@@ -149,13 +160,15 @@ def transfer(config,db,locks,server,row,spec,descriptors):
                 if added:state['snapshots'].append(snap)
                 state.update(baseline=state['baseline'] or name,intent=None)
                 if added or not state['latest']:state['latest']=name
-                pins=[c['params'].get('snapshot') for c in meta['commands'] if c['status']!='completed' and c['kind']=='restore' and c['params'].get('source')==source]
+                from .snapshot_browse import pins as browse_pins
+                pins=restore_pins(meta['commands'],source)|browse_pins(meta,source)
                 # Keep the catalogue before retention so a failed prune never
                 # loses evidence of a fully received snapshot.
                 control.write(row['account'],meta)
                 prune(runner,root,state,meta['policies'][source]['server_keep'],pins,lambda:control.write(row['account'],meta))
                 control.write(row['account'],meta)
         result={'state':'Completed','account':row['account'],'source':source,'snapshot':name}
+        if operation=='send':result.update(transfer_mode=params['mode'],parent=spec.get('parent'))
         db.execute("UPDATE jobs SET status='completed',result=%s,ended_at=UTC_TIMESTAMP() WHERE id=%s",(json.dumps(result),ident))
         db.event(job_operation+'.completed','Snapshot transfer completed for '+row['account'])
         return None if operation=='send' else result

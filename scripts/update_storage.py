@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Apply the current feature build to an existing YANP Nas 0.2.0 installation."""
 import argparse
+import contextlib
 import datetime as dt
 import json
 import os
@@ -8,12 +9,47 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.core import DB, Runner, Locks, atomic_write, require
 
 DIRECTORIES = ('agent', 'web', 'migrations', 'scripts', 'deploy', 'docs')
 FILES = ('README.md', 'LICENSE', 'VERSION')
+PACKAGES = ('openssh-server', 'sudo', 'tdb-tools', 'gddrescue', 'ntfs-3g', 'btrfs-progs', 'fdisk', 'e2fsprogs', 'udev')
+
+
+@contextlib.contextmanager
+def phase(label):
+    """Expose waits without printing command inputs or installed credentials."""
+    started=time.monotonic()
+    print(label+'...',end='',flush=True)
+    try:
+        yield
+    except BaseException:
+        print(f' failed ({time.monotonic()-started:.1f}s)',flush=True)
+        raise
+    else:
+        print(f' {time.monotonic()-started:.1f}s',flush=True)
+
+
+class UpdateRunner(Runner):
+    def run(self,args,**kwargs):
+        # Show only fixed command names/actions, never SQL, config or output.
+        label='Verify services, web interface and database' if args[-1].endswith('/scripts/healthcheck.py') else ' '.join(args[:3]) if args[0]=='systemctl' else ' '.join(args[:2])
+        with phase(label):
+            return super().run(args,**kwargs)
+
+
+def ensure_dependencies(run,refresh=False):
+    output=run.run(['dpkg-query','--show','--showformat=${Package}\t${Status}\n',*PACKAGES],allowed=(0,1))
+    installed={line.split('\t',1)[0] for line in output.splitlines() if '\t' in line and line.split('\t',1)[1] in ('install ok installed','hold ok installed')}
+    missing=[name for name in PACKAGES if name not in installed]
+    if not missing and not refresh:
+        print('All required packages are installed; skipping APT refresh/install.',flush=True)
+        return
+    run.run(['apt-get','update'],timeout=600)
+    run.run(['apt-get','install','-y',*(PACKAGES if refresh else missing)],timeout=600)
 
 
 def copy_application(source, destination):
@@ -69,8 +105,9 @@ def deploy(source, installed, backup, db, run, agent_unit=Path('/etc/systemd/sys
     require(template.is_file() and not template.is_symlink(), 'Missing or symlinked agent service template')
     require(agent_unit.is_file() and not agent_unit.is_symlink(), 'Missing or symlinked installed agent service')
     previous_unit = backup / 'yanp-agent.service'
-    shutil.copy2(agent_unit, previous_unit)
-    copy_application(installed, backup / 'application')
+    with phase('Back up application and agent unit'):
+        shutil.copy2(agent_unit, previous_unit)
+        copy_application(installed, backup / 'application')
     # Stop new web/timer submissions before checking jobs a second time. Never
     # interrupt an active backup, restore or other management operation.
     timers = run.run(['systemctl', 'list-units', '--type=timer', '--state=active',
@@ -84,12 +121,12 @@ def deploy(source, installed, backup, db, run, agent_unit=Path('/etc/systemd/sys
         for service in [*active_timers, *(['yanp-snapshot-sshd'] if snapshot_ssh else []), 'apache2']:
             run.run(['systemctl', 'stop', service], timeout=120)
             stopped.append(service)
-        idle(db)
+        with phase('Recheck active database jobs'):idle(db)
         run.run(['systemctl', 'stop', 'yanp-agent'], timeout=120)
         stopped.append('yanp-agent')
         refuse_application_mounts(installed, run)
         replaced = True
-        copy_application(source, installed)
+        with phase('Install application files'):copy_application(source, installed)
         if template.read_bytes() != agent_unit.read_bytes():
             unit_replaced = True
             atomic_write(agent_unit, template.read_text(), 0o644)
@@ -101,7 +138,7 @@ def deploy(source, installed, backup, db, run, agent_unit=Path('/etc/systemd/sys
         if replaced:
             run.run(['systemctl', 'stop', 'apache2', 'yanp-agent'], timeout=120)
             refuse_application_mounts(installed, run)
-            copy_application(backup / 'application', installed)
+            with phase('Restore previous application files'):copy_application(backup / 'application', installed)
         if unit_replaced:
             atomic_write(agent_unit, previous_unit.read_text(), previous_unit.stat().st_mode & 0o777)
             run.run(['systemctl', 'daemon-reload'], timeout=120)
@@ -109,22 +146,24 @@ def deploy(source, installed, backup, db, run, agent_unit=Path('/etc/systemd/sys
     finally:
         # Restore services and only the timers that were active on entry.
         failures = []
-        for service in reversed(stopped):
-            result = subprocess.run(['systemctl', 'start', service], capture_output=True, text=True)
-            if result.returncode:
-                print(f'Could not restart {service}; inspect its journal.', file=sys.stderr)
-                failures.append(service)
+        with phase('Restore active services and timers'):
+            for service in reversed(stopped):
+                result = subprocess.run(['systemctl', 'start', service], capture_output=True, text=True)
+                if result.returncode:
+                    print(f'Could not restart {service}; inspect its journal.', file=sys.stderr)
+                    failures.append(service)
         require(not failures, 'Service recovery needs attention: ' + ', '.join(failures))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--refresh-packages',action='store_true',help='Refresh APT and upgrade required packages even when already installed')
     args = parser.parse_args()
     if not args.apply:
         print('Run on the NAS from the new release checkout:\n'
-              '  sudo python3 -B scripts/update_storage.py --apply\n'
-              'Installs native filesystem/partition tools, backs up/replaces code and the agent unit, and restarts Apache/agent.\n'
+              '  python3 -B scripts/update_storage.py --apply\n'
+              'Run as root. Installs missing tools, backs up/replaces code and the agent unit, and restarts Apache/agent.\n'
               'Preserves database, accounts, certificates, shares and disk files.\n'
               'Requires an idle YANP Nas 0.2.0 installation on Debian 13.\n'
               'The web interface is briefly unavailable during deployment.')
@@ -142,14 +181,14 @@ def main():
             'This feature updater supports only YANP Nas 0.2.0')
     config = json.loads(Path('/etc/yanp-nas/agent.json').read_text())
     db = DB(config)
-    require([r['version'] for r in db.query('SELECT version FROM schema_versions ORDER BY version')] == [1],
-            'Unexpected database schema; no database migration is performed')
-    idle(db)
+    with phase('Check database schema and active jobs'):
+        require([r['version'] for r in db.query('SELECT version FROM schema_versions ORDER BY version')] == [1],
+                'Unexpected database schema; no database migration is performed')
+        idle(db)
     with Locks(config.get('lock_root','/run/yanp-nas/locks')).hold('storage'):
         require(not Path('/var/lib/yanp-nas/firewall-pending.json').exists(), 'Finish the pending firewall change first')
-        run = Runner()
-        run.run(['apt-get', 'update'], timeout=600)
-        run.run(['apt-get', 'install', '-y', 'openssh-server', 'sudo', 'tdb-tools', 'gddrescue', 'ntfs-3g', 'btrfs-progs', 'fdisk', 'e2fsprogs', 'udev'], timeout=600)
+        run = UpdateRunner()
+        ensure_dependencies(run,args.refresh_packages)
         stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
         backup = Path('/var/backups/yanp-nas') / ('storage-update-' + stamp)
         backup.mkdir(parents=True, mode=0o700)

@@ -50,11 +50,13 @@ def request_header(fd=0):
     request=json.loads(data)
     require(isinstance(request,dict),'Invalid receiver request')
     if request.get('source') is not None:
-        keys(request,('operation','source','snapshot'),('snapshot_uuid',))
+        keys(request,('operation','source','snapshot'),('snapshot_uuid','parent'))
         require(request['operation'] in ('receive','send'),'Receiver command is not allowed')
         require((request['operation']=='receive')==('snapshot_uuid' in request),'Invalid stream header')
         from .snapshot_control import source_id,managed_snapshot
         source_id(request['source']);managed_snapshot(request['snapshot'])
+        if 'parent' in request:
+            require(request['operation']=='send','Only snapshot returns can select a send parent');managed_snapshot(request['parent'])
         return request
     keys(request,('operation',))
     require(request['operation'] in ('receive','list'),'Receiver command is not allowed')
@@ -74,6 +76,12 @@ def run_receiver(config,db,operation):
         row=selected[0];server=SnapshotServer(config,db,Runner())
         if isinstance(operation,dict):
             from .snapshot_stream import transfer
+            from .snapshot_browse import tree_resource,tree_paused
+            if operation['operation']=='receive':
+                with lock.hold(tree_resource(account.pw_name,operation['source'])) as tree_descriptors:
+                    require(not tree_paused(config,account.pw_name,operation['source']),
+                            'Uploads for this snapshot tree are paused while its browsing mount is active')
+                    return transfer(config,db,lock,server,row,operation,(*descriptors,*tree_descriptors))
             return transfer(config,db,lock,server,row,operation,descriptors)
         # Enrolled clients must use per-source scopes, never the old container-root receive.
         from .snapshot_control import ClientControl

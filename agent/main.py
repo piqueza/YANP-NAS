@@ -39,13 +39,13 @@ from .system import System
 
 
 OPERATIONS = {
-    "snapshot.client_create", "snapshot.client_update", "snapshot.client_policy", "snapshot.client_command", "snapshot.client_remove", "snapshot.destination_create", "snapshot.destination_remove", "snapshot.create", "snapshot.configure", "snapshot.delete", "snapshot.remove", "system.state_export", "storage.clone", "storage.disable_auto_mount", "storage.reinitialize", "storage.delete_partition", "storage.name", "storage.mount", "storage.unmount", "storage.initialize", "storage.format_partition", "directory.create", "directory.rename", "directory.access", "directory.user_access",
+    "snapshot.measure", "snapshot.client_create", "snapshot.client_update", "snapshot.client_policy", "snapshot.client_command", "snapshot.client_remove", "snapshot.destination_create", "snapshot.destination_remove", "snapshot.create", "snapshot.configure", "snapshot.delete", "snapshot.remove", "system.state_export", "storage.clone", "storage.disable_auto_mount", "storage.reinitialize", "storage.delete_partition", "storage.name", "storage.mount", "storage.unmount", "storage.initialize", "storage.format_partition", "directory.create", "directory.rename", "directory.access", "directory.user_access",
     "share.save", "share.remove", "backup.save", "backup.run", "backup.restore", "backup.measure", "smart.read",
     "system.updates", "system.install", "system.reboot", "system.shutdown", "firewall.change",
     "fail2ban.ban", "fail2ban.unban", "fail2ban.configure", "account.state", "system.service",
 }
 READS = {"snapshot.client_view","snapshot.client_installer","snapshot.candidates","snapshot.inspect","storage.clone_plan","storage.signatures", "storage.reinitialize_plan", "storage.delete_partition_plan", "storage.browse", "state", "job.read", "backup.inspect", "system.warnings", "firewall.status", "fail2ban.status", "storage.initialize_plan", "storage.format_plan"}
-SYNC = {"snapshot.client_update","snapshot.client_policy","snapshot.client_command","storage.clone_cancel","account.sync", "firewall.confirm", "monitoring.save", "event.ack", "event.ack_all"}
+SYNC = {"snapshot.browse_open","snapshot.browse_close","snapshot.client_update","snapshot.client_policy","snapshot.client_command","storage.clone_cancel","account.sync", "firewall.confirm", "monitoring.save", "event.ack", "event.ack_all"}
 
 
 class Agent:
@@ -56,7 +56,7 @@ class Agent:
         self.monitor = Monitor(config, self.db, self.locks)
         self.ready = queue.Queue()
         self.enqueue_lock = threading.Lock()
-        self.db.execute("UPDATE jobs SET status='failed',error='Agent restarted during execution. Inspect live system state before retrying.',ended_at=UTC_TIMESTAMP() WHERE status='running' AND operation NOT IN ('snapshot.receive','snapshot.send')")
+        self.db.execute("UPDATE jobs SET status='failed',error='Agent restarted during execution. Inspect live system state before retrying.',ended_at=UTC_TIMESTAMP() WHERE status='running' AND operation NOT IN ('snapshot.receive','snapshot.send','snapshot.browse')")
         recover_receives(self.db)
         for row in self.db.query("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at"):
             self.ready.put(row["id"])
@@ -94,6 +94,13 @@ class Agent:
     def request(self, op, actor, params, root=False):
         user = self.authorize(op, actor, params, root)
         runner = Runner()
+        if op in ('snapshot.browse_open','snapshot.browse_close'):
+            from .snapshot_browse import SnapshotBrowse
+            require(isinstance(params,dict) and not has_sensitive_fields(params),'Invalid snapshot browsing parameters')
+            manager=SnapshotBrowse(self.config,self.db,self.locks)
+            result=manager.request(params,actor) if op=='snapshot.browse_open' else manager.close(params)
+            self.db.audit(actor,op,params)
+            return result
         if op in ('snapshot.client_installer','snapshot.client_view'):
             from .snapshot_control import ClientControl
             client_control=ClientControl(self.config,self.db,self.locks)
@@ -273,7 +280,9 @@ class Agent:
         snapshot_server=SnapshotServer(self.config,self.db,runner)
         from .snapshot_control import ClientControl
         clients=ClientControl(self.config,self.db,self.locks)
+        from .snapshot_usage import measure as measure_snapshots
         mapping = {
+            "snapshot.measure":lambda p:measure_snapshots(self.config,self.db,self.locks,p,runner),
             "snapshot.client_create":clients.create,"snapshot.client_policy":clients.configure,"snapshot.client_command":clients.command,"snapshot.client_remove":clients.remove,
             "snapshot.destination_create":snapshot_server.create_destination,"snapshot.destination_remove":snapshot_server.remove_destination,
             "snapshot.create":snapshot_server.create,"snapshot.configure":snapshot_server.configure,
@@ -316,7 +325,7 @@ class Agent:
                     claimed=cursor.rowcount==1
                 if not claimed:continue
                 self.db.event("job.running", f"{row['operation']} running", actor=row["actor_id"])
-                lock = "storage" if row["operation"] == "system.state_export" or row["operation"].split(".")[0] in ("snapshot", "storage", "directory", "share", "backup", "smart", "account") else "system"
+                lock = "snapshot-measure" if row["operation"]=="snapshot.measure" else "storage" if row["operation"] == "system.state_export" or row["operation"].split(".")[0] in ("snapshot", "storage", "directory", "share", "backup", "smart", "account") else "system"
                 # Monitor may be collecting SMART; queued commands retry the lock immediately.
                 deadline = time.monotonic() + 120
                 while True:

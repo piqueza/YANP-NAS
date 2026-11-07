@@ -281,7 +281,7 @@ def main():
         user.call('action',{'operation':'storage.signatures','params':{'stable_id':'not-a-device'}},expect=403)
         admin.call('action',{'operation':'storage.signatures','params':{'stable_id':'not-a-device'}},expect=422)
         passed('signature inspection is administrator-only and rejects unknown disks without changing storage')
-        for operation in ('snapshot.client_update','snapshot.client_create','snapshot.client_policy','snapshot.client_command','snapshot.client_remove','snapshot.client_installer','snapshot.client_view','snapshot.destination_create','snapshot.destination_remove','snapshot.candidates','snapshot.inspect','snapshot.create','snapshot.configure','snapshot.delete','snapshot.remove'):
+        for operation in ('snapshot.browse_open','snapshot.browse_close','snapshot.measure','snapshot.client_update','snapshot.client_create','snapshot.client_policy','snapshot.client_command','snapshot.client_remove','snapshot.client_installer','snapshot.client_view','snapshot.destination_create','snapshot.destination_remove','snapshot.candidates','snapshot.inspect','snapshot.create','snapshot.configure','snapshot.delete','snapshot.remove'):
             user.call('action',{'operation':operation,'params':{}},expect=403)
         assert 'snapshot_server' not in user.call('state')
         admin.call('action',{'operation':'snapshot.inspect','params':{'account':'root'}},expect=422)

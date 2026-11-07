@@ -33,9 +33,11 @@ class Samba:
                 "write list = " + " ".join(writers), "follow symlinks = no", "wide links = no",
                 "inherit acls = yes", "inherit permissions = yes", "create mask = 0660", "directory mask = 0770",
                 f"root preexec = /usr/bin/mountpoint -q {root}", "root preexec close = yes", ""])
+        from .snapshot_browse import samba_lines
+        lines.extend(samba_lines(self.config))
         return "\n".join(lines) + "\n"
 
-    def apply(self):
+    def apply(self,disconnect=True):
         content = self.render()
         main = self.main.read_text()
         require(str(self.path) in main, "Install the managed include in smb.conf before managing shares")
@@ -53,7 +55,7 @@ class Samba:
             self.run.run(["testparm", "-s", str(self.main)])
             self.run.run(["systemctl", "reload", "smbd"])
             # Drop established sessions as well as updating future authorization.
-            for row in self.db.query("SELECT name FROM shares"):
+            for row in self.db.query("SELECT name FROM shares") if disconnect else []:
                 self.run.run(["smbcontrol", "smbd", "close-share", label(row["name"], 64)])
         except Exception:
             atomic_write(self.path, previous, 0o644)

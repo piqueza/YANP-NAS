@@ -254,13 +254,62 @@ The client rechecks identities and mounts, and deletes by the verified native
 subvolume ID, not a mutable device/path alias. Destructive confirmations expire
 in five minutes, so a long-offline laptop cannot execute an old deletion later.
 
-**Return snapshot to client** sends a full read-only snapshot into a separate area
-under the client's `.yanp-snapshot-client-<installation>/restores/` subvolume on the
-source filesystem. The exact returned path is reported on the NAS. It never
+**Return snapshot to client** defaults to a full transfer. The operator can instead
+choose an incremental transfer when the client recently reported a compatible
+read-only parent. Both modes produce a complete read-only snapshot in a separate
+area under `.yanp-snapshot-client-<installation>/restores/` on the source filesystem.
+The exact returned path is reported on the NAS. It never
 changes the default/boot subvolume, overwrites the live source, reboots the client
 or performs an automatic rollback. A failed return can be queued again; only its
 own recorded writable partial copy may be cleared for a retry. Existing completed
 copies must match the expected received UUID.
+
+#### Full versus incremental return
+
+The return dialog offers **Full snapshot** and **Incremental transfer**, with a
+parent selector for incremental mode. Full mode remains available for older
+clients and defaults to selected. Incremental mode needs the new agent capability,
+a check-in within five minutes and matching reported snapshot name/native ID/UUID
+from the same source. The NAS matches the original client UUID to the received UUID
+of an older retained NAS snapshot. Most recent compatible parents are listed first;
+the initial baseline remains available if retained and compatible. The target
+cannot be its own parent. Missing/stale/incompatible reports disable incremental
+selection; server validation repeats on submission.
+
+Before sending, NAS native parent/target identities and read-only flags are checked
+again. The client rechecks its original managed parent ID, UUID and read-only flag
+before receiving. Pending return parents are pinned against local retention, and
+both the target and parent are protected on the NAS until completion. If the
+parent disappears before the client receives a queued task, the return fails
+explicitly; it does not download a full copy automatically. Interrupted streams
+retry with the same mode and intent, restarting the stream rather than resuming
+at an arbitrary byte offset. A missing/changed parent requires an explicit new
+choice rather than silently replacing the requested operation.
+
+Native incremental receive needs its parent reachable for UUID lookup. The client
+receives within its root-private installation subvolume using chroot, with the
+existing parent still at its original private snapshot path. The new snapshot is
+staged at that private root, verified read-only with the expected received UUID,
+and moved into the separate restore area using pinned directory FDs. No existing
+parent is moved or modified. Unrelated/incorrect staging data is refused; only a
+writable partial matching a recorded return intent can be removed on retry.
+Source files, boot/default subvolume and automatic rollback behavior are unchanged.
+
+The existing low-priority size scan now retains full referenced-content estimates
+from the same output, without another filesystem walk. Where available, these are
+shown separately from unshared footprint and used as an approximate full-transfer
+indicator. Older caches remain usable but have no contents estimate until their
+next scheduled/explicit refresh. Network bytes can differ; incremental changed-data
+volume is unknown until sending and is never equated with unshared footprint.
+Later snapshots are labelled Created after baseline. No expensive dry-run stream
+is generated just to populate the dialog.
+
+Update the NAS first, then let the existing client updater install the new agent
+(or update its program manually while idle). Incremental choices appear after the
+new capability/parent report. Native full/incremental return and cross-subvolume
+staging moves still need acceptance on a mounted Btrfs client before relying on
+this new path for recovery. Validate returned file contents and read-only flags;
+no rollback is initiated by a successful transfer.
 
 ### State migration and first-build acceptance
 
@@ -389,3 +438,174 @@ restore `agent.py.previous` to `agent.py` with root ownership/mode 0644 and rest
 `yanp-snapshot-client.service`. Immediate exec/installation failures attempt to
 restore the previous script automatically. Inspect the client journal if recovery
 is needed. Migration exports disable automatic updates on the replacement NAS.
+
+## Collapsible snapshot groups and size estimates
+
+Both NAS and client snapshot cards start with collapsed groups. Each group header
+shows its snapshot count and **Total storage estimate**. Expand it to see dated
+snapshot entries, baseline/incremental-parent markers and each **Size estimate**.
+NAS entries retain the Return snapshot action. Expanded groups stay open during
+normal background refreshes; a new page load starts collapsed.
+
+Measurements use read-only `btrfs filesystem du -s --raw` FIEMAP scans. For each
+group, the estimate is Exclusive plus Set shared: the latter counts overlapping
+shared data extents once. A group is measured directly across its snapshot tree;
+it is never calculated by summing snapshot sizes. Individual rows instead show
+**Size estimate (unshared data)** using Btrfs's Exclusive column: data currently
+unique to that snapshot. It can be near zero, including for an initial baseline,
+when newer snapshots or live files share its data. Shared data remains represented
+in the group total rather than arbitrarily assigned to one snapshot. This is not
+a baseline-plus-increment history or an incremental transfer size, nor a guarantee
+of space reclaimed by deletion. Metadata, inline extents and compression affect
+accuracy. NAS group scans may include retained partial receive data alongside
+completed snapshots. GNU `du --apparent-size` would show the full logical contents
+of each snapshot again; it cannot identify their individual unshared contribution.
+Older referenced-size caches/reports are not relabelled as unshared: they must be
+recomputed by the updated agent/NAS before individual sizes are shown.
+
+Completed snapshot estimates are retained until an operator requests a refresh.
+The first successful scan establishes the group total and snapshot figures.
+Afterwards automatic NAS and client scans walk only previously unmeasured snapshot
+identities, not the group tree or existing snapshots. Native ID/UUID bindings
+prevent a replacement snapshot from inheriting an unrelated estimate. A matching
+legacy cache is adopted without scanning; an older cache whose catalogue has
+already changed cannot safely bind individual figures and may need a one-time scan.
+
+The header shows **Last calculated** for the combined group total. Additions or
+removals mark this retained total as covering an older snapshot list. Individual
+figures also show their measurement dates: their unshared footprint can change
+as other snapshots or live files change. New item figures are never added to the
+group total, because doing so would double count shared data. Retention removes
+obsolete item entries but preserves the dated group total.
+
+**Refresh size estimates** explicitly recalculates the full NAS group, visible
+as an Activity operation. Updated clients advertise a manual local refresh action;
+it queues a request for their background size worker and works after reconnecting.
+Legacy clients must update before that action is enabled. Existing figures remain
+visible during recalculation and when a refresh fails, alongside a bounded error
+and attempt time. Failed/missing estimates can retry automatically with an hourly
+backoff for the same catalogue; completed estimates have no hourly expiry.
+
+NAS scans retain their one-hour limit and nice 19/idle I/O priority. Verified
+directory handles stay pinned while the global storage lock is released for the
+read-only walk. Concurrent catalogue changes prune obsolete item results and
+mark the group total as dated rather than discarding all completed work. No
+qgroups are enabled or snapshot data changed. An Unavailable label means a failed
+measurement, not one still running; missing values are never treated as zero.
+
+The client runs local group scans in its existing background measurement worker,
+separately from control polling/uploads. Each report includes a bounded catalogue
+of at most 256 individual snapshots across sources (at most 100 per source),
+preserving the baseline, incremental parent and newest entries. The header's
+count and group scan cover the full local group; truncation is stated when some
+entries are omitted. Size reports remain bounded to 256 KiB; the authenticated
+control request limit is 512 KiB to allow inventory and catalogue metadata.
+Older reports remain compatible, but need the updated client agent to provide
+individual local entries and estimates. Enable the existing automatic updater or
+perform the program-only client update after current operations finish. Update
+the NAS first. Remote snapshot data/credentials are preserved.
+
+Reference: [Btrfs filesystem du](https://btrfs.readthedocs.io/en/latest/btrfs-filesystem.html).
+
+### Measurement scheduling and priority
+
+Source estimates use ordinary GNU `du --apparent-size` and are refreshed hourly.
+Snapshot group/item estimates use `btrfs filesystem du`: an initial full scan,
+then only new snapshot identities automatically. Full rescans require manual
+refresh. NAS group scans allow up to one hour because a full scan walks the
+combined tree and each completed snapshot. Client scans and ordinary
+source estimates retain their five-minute limit. The NAS refresh button is
+disabled while its group is already calculating, including automatic scans.
+
+Both kinds of client measurement, and NAS snapshot-group measurements, now launch
+with `nice -n 19` and `ionice -c 3`. Only measurement subprocesses are lowered;
+control polling, snapshot creation and send/receive priority remain unchanged.
+Scans refuse to run at normal priority if the required priority tools are missing.
+`nice` is supplied by coreutils and `ionice` by util-linux; both are checked by new
+client installers and agent update preflight. This reduces CPU/I/O competition;
+I/O scheduler support varies, and it does not impose a memory or bandwidth cap.
+It cannot guarantee zero impact, particularly when walking large snapshot trees.
+
+For an already-running scan, root can identify its PID with
+`ps -ww -C btrfs -o pid,ni,args` (find `btrfs filesystem du`), then use
+`renice -n 19 -p PID` and `ionice -c 3 -p PID`. Replace PID with that scan's process
+ID, not the client service or a send/receive process. New code does not retroactively
+change the priority of an already-running old scan. Automatic updates wait until
+current native operations are idle.
+
+
+## Browse a NAS snapshot on its client
+
+Under **Snapshots stored on YANP**, expand a snapshot group and choose **Mount
+snapshot and share with client** below Return snapshot. Choose a local client
+account from the reported inventory; an active desktop session is selected by
+default. This draft supports one open recovery mount per client.
+
+Update the NAS first, then the client agent. Existing clients also need the
+`cifs-utils` package (including `mount.cifs`), a running systemd system manager
+and kernel CIFS support. On a Debian-based client, run as root if needed:
+
+```bash
+apt-get update
+apt-get install cifs-utils
+```
+
+The button is enabled after the updated client reports the required tools and
+local accounts. No package installation is triggered remotely by this action.
+New client installers check these dependencies before installation.
+
+YANP verifies the selected completed snapshot's native ID/UUID and read-only
+property, then directly bind-mounts it read-only; snapshot data is not copied.
+The mount is under the managed volume hierarchy's `.snapshot-views` directory so
+it does not incorrectly protect the entire backing disk as an external mount.
+An encrypted Samba share permits only a new per-mount, non-login account and the
+client's configured LAN. Symlink traversal is disabled. Samba reads through a
+forced root identity to preserve access to original backup permissions; both the
+share and the underlying native mount remain read-only.
+
+A generated password is stored in private server state and sent only to that
+enrolled client's pinned-TLS control channel. Web views, audit/job parameters
+and status reports exclude it. The client writes a mode-0600 credentials file;
+passwords do not appear in process arguments. Its CIFS mount requests SMB 3.1.1
+with encryption, `ro,nosuid,nodev,noexec`, forced UID/GID mapping to the selected
+local account and owner-only file/directory permissions. Mount helpers run as
+transient system services in the host mount namespace, because mounting inside
+the private agent namespace would hide the mount from Samba or the desktop.
+
+While requested/open/closing, only **that client's selected source tree** pauses
+new uploads. Local snapshot schedules and other source trees/clients continue.
+A receive already writing that same tree finishes before mounting; unrelated
+large initial receives do not hold up the mount. Existing system-wide transfer
+coordination is otherwise unchanged: this feature does not implement the future
+multi-host transfer scheduler. Server receive helpers enforce the scoped pause
+even if a client has not received its next control update. Tree lock descriptors
+stay inherited by native receives so a surviving child also protects its tree.
+
+After the client verifies its host-visible CIFS mount, YANP shows **SNAPSHOT
+MOUNTED** and `/mnt/yanp-snapshots/<mount-id>` for the file explorer. Files may be
+read or copied out, but cannot be edited in the snapshot. **Close snapshot share**
+revokes the share and asks the client agent to unmount it. Alternatively, a normal
+client-side unmount is detected by periodic host-namespace inspection; desktop
+unmounting may request administrator authentication. As root, the equivalent is:
+
+```bash
+umount /mnt/yanp-snapshots/<mount-id>
+```
+
+No lazy or forced unmount is used. Close open files if unmount reports busy. The
+NAS disconnects SMB sessions, removes the temporary account and native mount,
+and removes the password. Cleanup failures remain visible and retry; only the
+selected tree stays paused until a client that received the mount description
+confirms closure. An offline client therefore may show cleanup pending until it
+reconnects. A manually unmounted lease is never silently mounted again. The
+selected snapshot is pinned against retention throughout the lease. System-state
+export and managed-client removal require closing recovery mounts first. Client
+self-updates also defer while a mount is open. Disabling its receive access or
+changing its LAN requests server-side share closure.
+
+The mount lifecycle appears in Activity as `snapshot.browse`. No automatic
+rollback is performed. Validate the first real mount on the NAS/client before
+relying on it for file recovery; the automated checks use isolated/mock mounts.
+
+References: [systemd-run](https://www.freedesktop.org/software/systemd/man/latest/systemd-run.html)
+and [Linux CIFS usage](https://docs.kernel.org/admin-guide/cifs/usage.html).

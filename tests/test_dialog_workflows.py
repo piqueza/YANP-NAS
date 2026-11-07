@@ -7,6 +7,62 @@ import unittest
 
 @unittest.skipUnless(shutil.which('node'), 'Node is only needed for frontend checks')
 class DialogWorkflowTests(unittest.TestCase):
+    def test_snapshot_browse_actions_select_active_user_and_show_mount_location(self):
+        self.js(r"""
+context.FormData=class {constructor(form){return Object.entries(form.values);}};
+run(`user={role:'admin'};state={jobs:[]};let c={account:'ynpsnap_test',report:{agent:{browse_cifs:1},browse_users:[{uid:1000,name:'other',active:false},{uid:1001,name:'desktop',active:true}]}};snapshotDetail=c;let html='',calls=[];dialog=(title,body)=>html=body;action=async(op,p)=>calls.push({op,p});closeDialog=()=>{};`);
+assert.match(run("snapshotBrowseActions(c,'source','snapshot')"),/Mount snapshot and share with client/);
+(async()=>{
+ await run("clickAction({dataset:{action:'snapshot-browse-open',account:'ynpsnap_test',source:'source',snapshot:'snapshot'}})");
+ assert.match(run('html'),/value="1001" selected/);assert.match(run('html'),/Other volumes and clients continue normally/);assert.ok(!run('html').includes('name="password"'));
+ context.form={dataset:{form:'snapshot-browse'},values:{account:'ynpsnap_test',source:'source',snapshot:'snapshot',uid:'1001'},elements:{}};
+ await run('submit(form)');assert.equal(run('calls[0].op'),'snapshot.browse_open');assert.equal(run('calls[0].p.uid'),1001);
+ run("c.browse={id:'abc',source:'source',snapshot:'snapshot',state:'mounted',client_state:'mounted',client_path:'/mnt/yanp-snapshots/abc',local_user:'desktop'}");
+ const mounted=run("snapshotBrowseActions(c,'source','snapshot')");assert.match(mounted,/SNAPSHOT MOUNTED/);assert.match(mounted,/file explorer/);assert.match(mounted,/Close snapshot share/);
+ await run("clickAction({dataset:{action:'snapshot-browse-close',account:'ynpsnap_test',id:'abc'}})");assert.equal(run('calls[1].op'),'snapshot.browse_close');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+""")
+
+    def test_return_dialog_defaults_full_and_offers_reported_incremental_parent(self):
+        self.js(r"""
+context.FormData=class {constructor(form){return Object.entries(form.values);}};
+run(`user={role:'admin'};let c={account:'ynpsnap_test',received:{source:{snapshots:[{name:'target',created_at:2}],usage:{contents:{target:46000}}}},restore_parents:{source:[{name:'baseline',created_at:1}]}};snapshotDetail=c;let html='',calls=[];dialog=(title,body)=>html=body;action=async(op,p)=>calls.push({op,p});closeDialog=()=>{};`);
+(async()=>{
+ await run("clickAction({dataset:{action:'snapshot-return',account:'ynpsnap_test',source:'source',snapshot:'target'}})");
+ assert.match(run('html'),/<option value="full">Full snapshot/);assert.match(run('html'),/value="incremental" >Incremental transfer/);assert.match(run('html'),/baseline/);assert.match(run('html'),/contents estimate/);
+ context.form={dataset:{form:'snapshot-return'},values:{account:'ynpsnap_test',source:'source',snapshot:'target',mode:'full',parent:'baseline'},elements:{}};
+ await run('submit(form)');assert.ok(!('parent' in run('calls[0].p')));
+ context.form.values.mode='incremental';await run('submit(form)');assert.equal(run('calls[1].p.parent'),'baseline');
+ run('c.restore_parents={}');await run("clickAction({dataset:{action:'snapshot-return',account:'ynpsnap_test',source:'source',snapshot:'target'}})");assert.match(run('html'),/value="incremental" disabled/);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+""")
+
+    def test_snapshot_groups_are_collapsed_and_show_group_and_individual_estimates(self):
+        self.js(r"""
+run(`state={jobs:[]};let client={account:'ynpsnap_test'},scope={baseline:'snapshot-one',count:2,snapshots:[{name:'snapshot-one',created_at:123,uploaded:true},{name:'snapshot-two',created_at:124,uploaded:false}],usage:{basis:'exclusive',status:'ready',group_bytes:110,snapshots:{'snapshot-one':10,'snapshot-two':20},observed_at:123}};`);
+const nas=run("snapshotGroup(client,'source',scope,'System files (/)')");
+assert.match(nas,/<details class="snapshot-group" data-snapshot-group=/);assert.ok(!nas.includes('<details open'));
+assert.match(nas,/Total storage estimate: 110 B/);assert.match(nas,/Size estimate \(unshared data\): 10 B/);assert.match(nas,/Size estimate \(unshared data\): 20 B/);
+assert.match(nas,/Refresh size estimates/);assert.match(nas,/Return snapshot to client/);
+const local=run("snapshotGroup(client,'source',scope,'System files (/)',true)");assert.ok(!local.includes('Return snapshot'));assert.match(local,/Awaiting transfer/);
+assert.match(run("snapshotUsageLabel(null)"),/Awaiting/);assert.match(run("snapshotUsageLabel({status:'ready',group_bytes:0})"),/^0 B$/);
+assert.match(run("snapshotUsageLabel({status:'ready',snapshots:{old:100}},'old')"),/Awaiting unshared estimate/);
+run("scope.usage={basis:'exclusive',status:'unavailable',error:'Read failed: <fixture>',attempted_at:123}");
+const failed=run("snapshotGroup(client,'source',scope,'System files (/)')");
+assert.match(failed,/Size scan failed/);assert.match(failed,/Read failed: &lt;fixture&gt;/);assert.ok(!failed.includes('Read failed: <fixture>'));
+assert.match(run("snapshotUsageNotice({status:'calculating'})"),/in progress at low priority/);
+assert.match(run("snapshotUsageNotice({status:'calculating'})"),/up to an hour/);
+assert.ok(!run("snapshotUsageNotice({status:'calculating'},true)").includes('up to an hour'));
+run("scope.usage={basis:'exclusive',status:'calculating'}");
+const scanning=run("snapshotGroup(client,'source',scope,'System files (/)')");
+assert.match(scanning,/data-action="snapshot-measure"[^>]*disabled/);
+assert.match(run("snapshotUsageNotice({status:'unavailable'})"),/older result has no recorded error/);
+run("scope.usage={basis:'exclusive',status:'calculating',group_bytes:110,snapshots:{'snapshot-one':10},observed_at:123,stale:true,measured_at:{'snapshot-one':123}};client.report={agent:{snapshot_size_refresh:1}}");
+const dated=run("snapshotGroup(client,'source',scope,'System files (/)')");
+assert.match(dated,/Total storage estimate: 110 B/);assert.match(dated,/Last calculated:/);assert.match(dated,/Snapshot list has changed/);assert.match(dated,/unshared data\): 10 B/);assert.match(dated,/Estimated:/);
+assert.match(run("snapshotGroup(client,'source',scope,'System files (/)',true)"),/data-action="snapshot-client-measure"/);
+""")
+
     def test_client_update_notice_and_opt_in_form_never_offer_legacy_auto_install(self):
         self.js(r"""
 context.FormData=class {constructor(form){return Object.entries(form.values);}};

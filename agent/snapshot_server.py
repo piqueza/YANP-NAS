@@ -297,7 +297,10 @@ class SnapshotServer:
             if locks is not None:
                 control=ClientControl(self.config,self.db,locks)
                 with locks.hold('client:'+row['account']):
-                    managed=control.read(row['account']);managed.update(lan=network,public_key=key);control.write(row['account'],managed)
+                    managed=control.read(row['account'])
+                    from .snapshot_browse import active
+                    if active(managed) and (not enabled or managed['lan']!=network):managed['browse'].update(desired='unmounted',state='closing')
+                    managed.update(lan=network,public_key=key);control.write(row['account'],managed)
         if not enabled:sync_control()
         if enabled:
             try:

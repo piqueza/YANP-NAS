@@ -36,6 +36,28 @@ def spec():return {'enabled':True,'interval_minutes':60,'client_keep':2,'server_
 
 
 class ControlTests(unittest.TestCase):
+    def test_private_snapshot_share_delivery_and_scoped_pause_are_not_exposed_in_web_view(self):
+        self.enroll();row=self.control.read(self.row['account']);ident='d'*32;password='private-fixture-share-password'
+        row['browse']={'id':ident,'source':SOURCE,'snapshot':NAME,'state':'waiting_for_client','desired':'mounted','server_ready':True,'password':password,'uid':1000,'gid':1000,'local_user':'desktop','created_at':123}
+        self.control.write(row['account'],row)
+        reply=self.poll()
+        self.assertEqual(reply['browse']['password'],password);self.assertEqual(reply['paused_sources'],[SOURCE])
+        view=self.control.view({'account':row['account']})
+        self.assertNotIn(password,json.dumps(view));self.assertNotIn('password',view['browse'])
+        reply=self.poll(report={'browse':{'id':ident,'state':'closed','path':'/mnt/yanp-snapshots/'+ident}})
+        self.assertEqual(reply['browse'],{'id':ident,'desired':'unmounted'});self.assertNotIn(password,json.dumps(reply))
+
+    def test_local_size_refresh_requires_capability_and_source_only_params(self):
+        row=self.control.read(self.row['account']);row.update(status='Initialised',policies={SOURCE:spec()},report={})
+        self.control.write(row['account'],row)
+        request={'account':row['account'],'kind':'refresh_sizes','source':SOURCE}
+        with self.assertRaisesRegex(Error,'Update the client agent'):self.control.command(request)
+        row['report']={'agent':{'snapshot_size_refresh':1}};self.control.write(row['account'],row)
+        result=self.control.command(request)
+        task=self.control.read(row['account'])['commands'][-1]
+        self.assertEqual(task['id'],result['command_id']);self.assertEqual(task['params'],{'source':SOURCE})
+        with self.assertRaises(Error):self.control.command({**request,'snapshot':NAME})
+
     def setUp(self):
         self.folder=tempfile.TemporaryDirectory();self.addCleanup(self.folder.cleanup)
         self.root=Path(self.folder.name);self.db=database([{**record(),'subvolume_id':256}],destination_rows=[destination()])

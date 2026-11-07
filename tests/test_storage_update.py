@@ -1,15 +1,39 @@
 # SPDX-License-Identifier: GPL-2.0-only
 import tempfile
 import json
+import io
 from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, patch
 
 from agent.core import Error
-from scripts.update_storage import DIRECTORIES, FILES, copy_application, deploy, idle
+from scripts.update_storage import DIRECTORIES, FILES, PACKAGES, copy_application, deploy, idle, ensure_dependencies, UpdateRunner
 
 
 class StorageUpdateTests(unittest.TestCase):
+    def test_installed_dependencies_do_not_use_apt_or_network(self):
+        run=MagicMock();run.run.return_value='\n'.join(name+'\t'+('hold ok installed' if name=='btrfs-progs' else 'install ok installed') for name in PACKAGES)
+        with patch('sys.stdout',new_callable=io.StringIO):ensure_dependencies(run)
+        run.run.assert_called_once()
+        self.assertEqual(run.run.call_args.args[0][0],'dpkg-query')
+
+    def test_missing_or_partially_installed_dependencies_are_installed(self):
+        run=MagicMock();run.run.return_value='\n'.join(name+'\t'+('deinstall ok config-files' if name=='ntfs-3g' else 'install ok unpacked' if name=='btrfs-progs' else 'install ok installed') for name in PACKAGES if name!='gddrescue')
+        ensure_dependencies(run)
+        self.assertEqual([c.args[0] for c in run.run.call_args_list][1:],
+                         [['apt-get','update'],['apt-get','install','-y','gddrescue','ntfs-3g','btrfs-progs']])
+
+    def test_explicit_package_refresh_preserves_full_dependency_upgrade(self):
+        run=MagicMock();run.run.return_value='\n'.join(name+'\tinstall ok installed' for name in PACKAGES)
+        ensure_dependencies(run,refresh=True)
+        self.assertEqual(run.run.call_args.args[0],['apt-get','install','-y',*PACKAGES])
+
+    def test_updater_times_commands_without_exposing_sql_and_preserves_failure(self):
+        with patch('scripts.update_storage.Runner.run',side_effect=Error('fixture failure')),patch('scripts.update_storage.time.monotonic',side_effect=[10,32.5]),patch('sys.stdout',new_callable=io.StringIO) as output:
+            with self.assertRaisesRegex(Error,'fixture failure'):
+                UpdateRunner().run(['mariadb','--protocol=socket'],input='private fixture SQL')
+            self.assertIn('failed (22.5s)',output.getvalue());self.assertNotIn('private fixture SQL',output.getvalue())
+
     def source(self, root):
         for name in DIRECTORIES:
             (root/name).mkdir(parents=True)

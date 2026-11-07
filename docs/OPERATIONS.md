@@ -20,9 +20,34 @@ unavailable. No speed is shown for inactive links or loopback.
 ### Existing partition and NTFS feature update
 
 For an existing YANP Nas 0.2.0 installation, use
-`sudo python3 -B scripts/update_storage.py --apply` from the copied release
+`python3 -B scripts/update_storage.py --apply` as root from the copied release
 directory outside `/opt/yanp-nas`. This preserves the database and settings;
 see [STORAGE.md](STORAGE.md) for the procedure and mount permissions.
+
+The updater prints elapsed times for its database checks, application backup/copy,
+service commands and startup verification. Required dependencies are checked with
+local `dpkg-query` metadata. When all are fully installed (including held packages),
+APT refresh/install is skipped. Missing or partly configured dependencies trigger
+APT refresh and installation of those packages. To deliberately refresh APT and
+upgrade all required packages, add `--refresh-packages`. Routine OS updates remain
+available through the system update workflow or the usual Debian tools.
+
+The updater neither dumps nor copies the database. Its active-job check uses the
+`job_status` index. Application backups are stored separately under
+`/var/backups/yanp-nas`; previous backup folders, Git metadata, release exports and
+tests are not recursively included in the application copy. Old code backups do
+accumulate and should be considered when checking free space. Job output is capped
+at 262,144 characters per job, while job/event/audit history currently has no age
+retention limit. To inspect approximate database growth without scanning log blobs,
+run this read-only query as root:
+
+```bash
+mariadb --table -e "SELECT TABLE_NAME AS table_name, TABLE_ROWS AS estimated_rows, ROUND((DATA_LENGTH+INDEX_LENGTH)/1048576,2) AS estimated_mib FROM information_schema.TABLES WHERE TABLE_SCHEMA='yanp_nas' ORDER BY DATA_LENGTH+INDEX_LENGTH DESC;"
+```
+
+Metadata figures are estimates, not exact row or filesystem usage counts. A slow
+feature update should be investigated using its stage timings rather than assumed
+to be caused by database growth.
 
 ### Switch an existing 9443 installation to default Apache ports
 

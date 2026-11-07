@@ -48,8 +48,8 @@ def main():
     if sys.version_info<(3,9):raise RuntimeError('Python 3.9 or later is required')
     if not Path('/run/systemd/system').is_dir():raise RuntimeError('A running systemd system manager is required')
     os.umask(0o077)
-    for tool in ('btrfs','findmnt','blkid','mount','ssh','ssh-keygen','systemctl','du'):
-        if not shutil.which(tool):raise RuntimeError('Install Python 3, btrfs-progs, util-linux and openssh-client; missing '+tool)
+    for tool in ('btrfs','findmnt','blkid','mount','ssh','ssh-keygen','systemctl','du','nice','ionice','mount.cifs','systemd-run','umount'):
+        if not shutil.which(tool):raise RuntimeError('Install Python 3, btrfs-progs, util-linux, openssh-client and cifs-utils; missing '+tool)
     capabilities=subprocess.run(['btrfs','subvolume','delete','--help'],capture_output=True,text=True,check=True).stdout
     if '--subvolid' not in capabilities:raise RuntimeError('Update btrfs-progs: native subvolume-ID deletion is required')
     root=Path(__file__).resolve().parent;bootstrap=root/'bootstrap.json';target=Path('/etc/yanp-snapshot-client');program=Path('/opt/yanp-snapshot-client')

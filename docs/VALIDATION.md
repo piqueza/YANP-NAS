@@ -1,5 +1,129 @@
 # Validation and target-server acceptance
 
+## Feature updater latency diagnostics, 7 November 2026
+
+The focused **16 updater/release checks** pass. New cases verify fully installed
+and held dependencies skip APT, absent/partly configured dependencies trigger the
+required install, explicit package refresh preserves the full dependency upgrade
+and failed commands retain their exception while printing elapsed time without
+SQL inputs. Existing tests cover quiescence checks, service-unit backup/order,
+healthcheck failure rollback, application-copy boundaries and recovery of services
+and timers. A read-only native dpkg query confirmed the status format and the
+mixed installed/missing exit status used by the parser. Package mutations and
+service operations were mocked; no NAS was updated or benchmarked. Actual time
+saved remains dependent on repository access, disk I/O and service readiness.
+Database history was not deleted or altered by this change.
+
+## Persistent snapshot size estimates, 7 November 2026
+
+The build passes **403 local checks** (404 tests; root/systemd APT check skipped,
+loopback TLS tested separately) and **63 isolated integration checks**. New tests
+verify successful cache retention beyond an hour, new-only native scans on NAS
+and client, stable group totals/dates, identity-bound item reuse, deletion cleanup,
+manual full rescans, retained figures on failure and capability-gated client
+refresh commands with strict source-only parameters. Frontend checks verify
+cached numbers remain visible while scanning, dated/stale group headers and the
+updated client refresh action. Legacy matching caches are adopted without native
+scans; changed legacy catalogues retain the dated group figure but cannot safely
+reuse individual figures without native identity metadata.
+
+Tests use disposable files, mocked snapshot metadata and isolated localhost
+services. No real NAS or client was accessed. Deploy NAS first, then update client
+agents to stop their old hourly snapshot scans and enable local manual refresh.
+Ordinary live-source estimates and destination free-space observations retain
+their existing schedules. Completed snapshot estimates no longer expire; failed
+or missing estimates may retry with backoff. Target acceptance should confirm a
+new received snapshot adds only its own scan and that manual refresh updates the
+whole group while leaving snapshot contents and retention policies unchanged.
+
+## Confirmed NAS scan timeout, 6 November 2026
+
+The target NAS reported `/usr/bin/nice exceeded 300s`, confirming that the
+measurement was killed by the old five-minute limit. NAS group scans now allow
+3600 seconds, retaining nice 19/idle I/O, pinned directory identities, catalogue
+checks and explicit failure reporting. Client/source limits remain unchanged.
+The UI explains that NAS scans may take up to an hour and disables refresh for a
+group while its automatic scan is in progress. Focused usage/UI checks verify
+the longer native command budget and disabled refresh without an Activity job.
+The 400-test suite passes with two environment skips (398 passed); the focused
+36-test suite also passes. A completed scan of the large NAS group still needs
+verification after deployment; no live NAS/client was changed by these checks.
+
+## Snapshot size failure diagnostics, 6 November 2026
+
+The build passes **399 local checks** (400 run; root/systemd APT check skipped),
+including the separately permitted loopback TLS fixture, and **63 isolated
+integration checks**. Three new tests cover native Btrfs FIEMAP output through
+nice/ionice with inherited directory descriptors, local failure diagnosis/cache
+backoff and a failed NAS refresh retaining its reason and raising a job failure.
+Existing usage validation/UI tests also verify bounded diagnostic fields, escaped
+error display, legacy undiagnosed errors and the in-progress notice. The native
+test uses an fsynced disposable ordinary file on the workspace Btrfs filesystem;
+it does not create or change production snapshots.
+
+The NAS screenshot establishes an unavailable estimate but does not establish
+the native failure cause. Previously the exception and manual command log were
+discarded. This change preserves them in private state, the group card, Activity
+and the service journal. Native NAS logs or a retry with this build are still
+needed to distinguish the five-minute scan timeout from a native filesystem or
+parser failure. No target NAS/client was accessed or modified.
+
+## Full and incremental snapshot returns, 6 November 2026
+
+The build passes **396 local checks** (397 run; root/systemd APT check skipped)
+and **63 isolated integration checks**, including the separately permitted TLS
+fixture. Eight new return tests cover capability/freshness/readonly/UUID candidate
+filtering, command identity binding, parent retention pins, fixed SSH/header
+framing, pinned native `send -p` construction, changed-parent refusal, client
+staging/verified move/retry without full fallback, runtime readonly/ID/UUID checks
+and local retention of pending parents. A new frontend check covers default full
+mode, compatible-parent selection, unavailable incremental mode and exclusion of
+parent parameters in full mode. Browser QA verifies both dialog states and the
+incremental transfer-size explanation. Existing full-return/retry, client update,
+measurement priority and security tests remain passing. Full-content estimates
+reuse existing scan output; no extra native scan was added. The report payload is
+bounded to 256 KiB within the existing 512-KiB control request boundary.
+
+Filesystem operations/processes in the new return tests use disposable fixtures
+and mocked Btrfs tools. No live client or NAS was changed. Mounted-Btrfs acceptance
+must verify original/received parent UUID and transid lookup, confined receive,
+cross-subvolume rename, file contents/read-only result, disconnect recovery and
+retention during a queued return. These local checks do not prove kernel/filesystem
+behavior or automatic OS rollback (which remains deliberately absent).
+
+## Low-impact scans and unshared snapshot figures, 6 November 2026
+
+The build passes **387 local checks** (388 run; root/systemd APT check skipped),
+including the separately permitted loopback TLS fixture. Native subprocess tests
+verify measurement children have nice 19 and idle I/O priority while the parent
+agent's priority is unchanged. Missing priority tools prevent scans rather than
+falling back to normal scheduling. Both GNU source scans and Btrfs group/item
+scans use the wrapper; NAS measurement uses the same helper. Snapshot group totals
+retain Exclusive plus Set shared, while individual rows now report Exclusive
+bytes. Tests distinguish the two values and check the new cache basis marker so
+old full-content values cannot be relabelled as unshared data. Source apparent
+sizes and scan cadence are unchanged. No live client's process priority was
+changed; actual responsiveness depends on scheduler, metadata/cache pressure and
+hardware, and these changes do not impose a memory limit.
+
+## Snapshot groups and shared-data estimates, 6 November 2026
+
+The build passes **385 local checks** (386 total; root/systemd APT check skipped)
+and **63 isolated integration checks**. The full suite ran 385 tests before the
+final local-group cache test was added; the focused usage/UI/control suite passed
+afterward. The loopback TLS check ran separately with permission and verifies the
+512-KiB control request boundary. Tests cover Exclusive-plus-Set-shared parsing,
+incomplete/invalid estimates, bounded local catalogues retaining baseline/parent,
+stale membership refusal, live local caching and verified NAS measurement with
+the global storage lock released during the native scan and all pinned FDs closed.
+UI checks cover collapsed groups, distinct group/item estimates and missing/zero
+states. Browser QA used synthetic shared group totals, expanded NAS/client lists,
+return actions and preservation of expansion after refresh. Integration confirms
+administrator-only measurement actions. No NAS/client was accessed or modified.
+Mounted-Btrfs FIEMAP accuracy across compression, sharing and concurrent native
+receive/retention still requires target acceptance; estimates do not establish
+incremental transfer sizes, exclusive ownership or reclaimable disk space.
+
 ## Incremental parent confirmation and full-copy fallback, 5 November 2026
 
 The build passes **379 local checks** (380 run; root/systemd APT check skipped),

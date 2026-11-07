@@ -24,6 +24,7 @@ from .snapshot_config import receivers
 from .snapshot_server import SnapshotServer,SSH_ROOT,receiver_name,public_key,lan_network,snapshot_name
 
 PORT=9444
+MAX_CONTROL_REQUEST=512*1024
 TOKEN=re.compile(r'[a-f0-9]{64}')
 SOURCE=re.compile(r'[a-f0-9]{24}')
 SNAPSHOT=re.compile(r'ynp-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{16}')
@@ -86,14 +87,55 @@ def validate_inventory(items):
     return result
 
 
+def validate_usage(value):
+    if value is None:return
+    keys(value,('status','group_bytes','snapshots','observed_at','attempted_at','fingerprint'),('basis','contents','error','identities','measured_at','stale','attempt_fingerprint'))
+    if 'error' in value:require(isinstance(value['error'],str) and len(value['error'])<=1000,'Invalid snapshot usage error')
+    if 'stale' in value:boolean(value['stale'])
+    if 'attempt_fingerprint' in value:require(isinstance(value['attempt_fingerprint'],str) and TOKEN.fullmatch(value['attempt_fingerprint']),'Invalid scan attempt fingerprint')
+    for field in ('identities','measured_at'):
+        if field not in value:continue
+        require(isinstance(value[field],dict) and len(value[field])<=500,'Invalid snapshot estimate metadata')
+        for name,item in value[field].items():
+            managed_snapshot(name)
+            if field=='measured_at':integer(item,0)
+            else:
+                keys(item,('id','uuid'));integer(item['id'],256);uuid_value(item['uuid'])
+    if 'basis' in value:require(value['basis']=='exclusive','Invalid snapshot usage basis')
+    require(value['status'] in ('calculating','ready','unavailable'),'Invalid snapshot usage status')
+    require(isinstance(value['fingerprint'],str) and TOKEN.fullmatch(value['fingerprint']),'Invalid snapshot usage fingerprint')
+    integer(value['observed_at'],0);integer(value['attempted_at'],0)
+    if value['group_bytes'] is not None:integer(value['group_bytes'],0)
+    require(value['status']!='ready' or value['group_bytes'] is not None,'Ready snapshot usage requires a group size')
+    require(isinstance(value['snapshots'],dict) and len(value['snapshots'])<=500,'Invalid snapshot usage catalogue')
+    for name,size in value['snapshots'].items():managed_snapshot(name);integer(size,0)
+    if 'contents' in value:
+        require(isinstance(value['contents'],dict) and len(value['contents'])<=500,'Invalid snapshot contents estimates')
+        for name,size in value['contents'].items():managed_snapshot(name);integer(size,0)
+
+
 def validate_report(report):
-    keys(report,(),('sources','errors','restores','sizes','agent'))
+    keys(report,(),('sources','errors','restores','sizes','agent','browse_users','browse'))
     if 'agent' in report:
-        agent=report['agent'];keys(agent,('sha256','updater'),('update_error',))
+        agent=report['agent'];keys(agent,('sha256','updater'),('update_error','restore_incremental','snapshot_size_refresh','browse_cifs'))
         require(isinstance(agent['sha256'],str) and TOKEN.fullmatch(agent['sha256']),'Invalid client build')
         integer(agent['updater'],1,1)
+        if 'restore_incremental' in agent:integer(agent['restore_incremental'],1,1)
+        if 'snapshot_size_refresh' in agent:integer(agent['snapshot_size_refresh'],1,1)
+        if 'browse_cifs' in agent:integer(agent['browse_cifs'],0,1)
         require(isinstance(agent.get('update_error',''),str) and len(agent.get('update_error',''))<=300,'Invalid update status')
-    require(len(json.dumps(report))<=131072,'Client report is too large')
+    require(len(json.dumps(report))<=262144,'Client report is too large')
+    users=report.get('browse_users',[])
+    require(isinstance(users,list) and len(users)<=64,'Invalid local account inventory')
+    for local in users:
+        keys(local,('uid','gid','name','active'));integer(local['uid'],1000,60000);integer(local['gid'],1);boolean(local['active'])
+        require(isinstance(local['name'],str) and re.fullmatch(r'[a-zA-Z0-9_.-]{1,64}',local['name']),'Invalid local account name')
+    if report.get('browse'):
+        view=report['browse'];keys(view,('id','state'),('path','error'))
+        require(isinstance(view['id'],str) and re.fullmatch(r'[a-f0-9]{32}',view['id']),'Invalid view ID')
+        require(view['state'] in ('mounting','mounted','closed','failed'),'Invalid client mount state')
+        if 'path' in view:require(view['path']=='/mnt/yanp-snapshots/'+view['id'],'Invalid client snapshot mountpoint')
+        if 'error' in view:require(isinstance(view['error'],str) and len(view['error'])<=1000,'Invalid mount error')
     sizes=report.get('sizes',{})
     require(isinstance(sizes,dict) and len(sizes)<=256,'Invalid client source sizes')
     for key,size in sizes.items():
@@ -104,10 +146,20 @@ def validate_report(report):
         integer(size['observed_at'],0);integer(size['attempted_at'],0)
     require(isinstance(report.get('sources',{}),dict) and len(report.get('sources',{}))<=32,'Invalid source status')
     for key,value in report.get('sources',{}).items():
-        source_id(key);keys(value,('baseline','parent','last_snapshot','count'))
+        source_id(key);keys(value,('baseline','parent','last_snapshot','count'),('snapshots','usage'))
         for name in ('baseline','parent'):
             if value[name] is not None:managed_snapshot(value[name])
         integer(value['last_snapshot'],0);integer(value['count'],0,1000)
+        if 'snapshots' in value:
+            require(isinstance(value['snapshots'],list) and len(value['snapshots'])<=min(100,value['count']),'Invalid local snapshot catalogue')
+            seen=set()
+            for snap in value['snapshots']:
+                keys(snap,('name','created_at','uploaded'),('id','uuid','read_only'));managed_snapshot(snap['name']);integer(snap['created_at'],0);boolean(snap['uploaded'])
+                if any(k in snap for k in ('id','uuid','read_only')):
+                    keys(snap,('name','created_at','uploaded','id','uuid','read_only'));integer(snap['id'],256);uuid_value(snap['uuid']);boolean(snap['read_only'])
+                require(snap['name'] not in seen,'Duplicate local snapshot');seen.add(snap['name'])
+        validate_usage(value.get('usage'))
+    require(sum(len(s.get('snapshots',[])) for s in report.get('sources',{}).values())<=256,'Local snapshot report exceeds catalogue limit')
     require(isinstance(report.get('errors',[]),list) and len(report.get('errors',[]))<=20,'Invalid client errors')
     for error in report.get('errors',[]):
         keys(error,('at','message'));integer(error['at'],0);require(isinstance(error['message'],str) and len(error['message'])<=1000,'Invalid client error')
@@ -149,7 +201,26 @@ def validate_migration_records(rows,settings):
             require(isinstance(scope['snapshots'],list) and len(scope['snapshots'])<=500,'Invalid snapshot catalogue')
             for snapshot in scope['snapshots']:
                 keys(snapshot,('id','uuid','received_uuid','name','created_at'));integer(snapshot['id'],256);uuid_value(snapshot['uuid']);uuid_value(snapshot['received_uuid']);managed_snapshot(snapshot['name']);integer(snapshot['created_at'])
+            validate_usage(scope.get('usage'))
     return rows
+
+
+def restore_candidates(row,source,target=None):
+    if row.get('report',{}).get('agent',{}).get('restore_incremental')!=1 or time.time()-(row.get('last_seen') or 0)>300:return []
+    remote={s['name']:s for s in row.get('received',{}).get(source,{}).get('snapshots',[])}
+    selected=remote.get(target)
+    if target is not None and selected is None:return []
+    reported=row.get('report',{}).get('sources',{}).get(source,{}).get('snapshots',[])
+    result=[]
+    for s in reported:
+        r=remote.get(s['name'])
+        if r and s.get('read_only') is True and 'id' in s and 'uuid' in s and r['received_uuid']==s['uuid'] and (target is None or (s['name']!=target and (r['created_at'],r['id'])<(selected['created_at'],selected['id']))):
+            result.append(dict(name=s['name'],id=s['id'],uuid=s['uuid'],created_at=r['created_at'],server_id=r['id']))
+    return sorted(result,key=lambda p:(p['created_at'],p['server_id']),reverse=True)
+
+
+def restore_pins(commands,source):
+    return {c['params'].get(field) for c in commands if c['status']!='completed' and c['kind']=='restore' and c['params'].get('source')==source for field in ('snapshot','parent')}
 
 
 def agent_build():
@@ -196,7 +267,11 @@ class ClientControl:
         fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
         with os.fdopen(fd) as f:
             info=os.fstat(f.fileno());require(stat.S_ISREG(info.st_mode) and info.st_uid==os.geteuid() and info.st_mode&0o077==0 and info.st_size<=8*1024**2,'Unsafe client control record')
-            return json.load(f)
+            row=json.load(f)
+        from scripts.snapshot_client import snapshot_usage_cache
+        for scope in (row.get('received') or {}).values():
+            if scope.get('usage'):scope['usage']=snapshot_usage_cache(scope['usage'],scope['snapshots'])
+        return row
 
     def write(self,account,value):
         self.directory();atomic_write(self.path(account),json.dumps(value),0o600)
@@ -215,7 +290,14 @@ class ClientControl:
     def view(self,p):
         keys(p,('account',));row=self.read(p['account'])
         result={k:row.get(k) for k in ('account','uuid','name','status','last_seen','created_at','inventory','policies','commands','report','received')}
+        for scope in (result.get('received') or {}).values():
+            if scope.get('usage'):
+                from scripts.snapshot_client import snapshot_usage_cache
+                scope['usage']=snapshot_usage_cache(scope['usage'],scope['snapshots']) if scope['usage'].get('basis')=='exclusive' else None
+        from .snapshot_browse import summary,paused_sources
+        result['browse']=summary(row.get('browse'));result['paused_sources']=paused_sources(row)
         result['destination_space']=destination_space(self.config,row['uuid'])
+        result['restore_parents']={key:restore_candidates(row,key) for key in row.get('received',{})}
         return result
 
     def update_preference(self,p):
@@ -272,7 +354,7 @@ class ClientControl:
         with zipfile.ZipFile(buffer,'w',zipfile.ZIP_DEFLATED) as z:
             files={'bootstrap.json':json.dumps(bootstrap).encode(),'agent.py':(source/'scripts/snapshot_client.py').read_bytes(),
                    'install.py':(source/'scripts/install_snapshot_client.py').read_bytes(),
-                   'README.txt':b'PRIVATE one-time installer. Extract into a root-owned mode-0700 directory. Run sudo python3 -B install.py --apply. Requires Linux, systemd, Python 3, openssh-client, util-linux and btrfs-progs. No automatic rollback is performed. Installer enrollment expires after 24 hours. Delete this package after successful installation. Root on either host can inspect its own credentials.\n'}
+                   'README.txt':b'PRIVATE one-time installer. Extract into a root-owned mode-0700 directory. Run python3 -B install.py --apply as root. Requires Linux, systemd, Python 3, openssh-client, util-linux, btrfs-progs and cifs-utils. No automatic rollback is performed. Installer enrollment expires after 24 hours. Delete this package after successful installation. Root on either host can inspect its own credentials.\n'}
             for name,content in files.items():
                 item=zipfile.ZipInfo(name);item.external_attr=(0o100600)<<16;item.compress_type=zipfile.ZIP_DEFLATED;z.writestr(item,content)
         target=self.root/(row['account']+'.zip');fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
@@ -344,13 +426,17 @@ class ClientControl:
             for command in row['commands']:
                 if command['status']!='completed' and command['kind']=='delete_subvolume' and time.time()>command.get('expires_at',0):
                     command.update(status='completed',ok=False,message='Deletion confirmation expired while waiting for the client; reconfirm to retry.',completed_at=int(time.time()))
+            from .snapshot_browse import SnapshotBrowse,paused_sources
+            manager=SnapshotBrowse(self.config,self.db,self.locks)
+            manager.report(row,p['report'].get('browse'))
+            delivery=manager.delivery(row)
             row.update(last_seen=int(time.time()),inventory=inventory,report=p['report'],bootstrap_hash=None)
             self.write(row['account'],row)
             (self.root/(row['account']+'.zip')).unlink(missing_ok=True)
             _,build=agent_build()
             if previous_build and previous_build!=build and p['report'].get('agent',{}).get('sha256')==build:
                 self.db.event('snapshot.client.updated','Client agent updated: '+row['account'])
-            return {'agent_update':{'enabled':row.get('auto_update',False),'sha256':build},'policies':row['policies'],'received':row.get('received',{}),'commands':[c for c in row['commands'] if c['status']!='completed'],
+            return {'browse':delivery,'paused_sources':paused_sources(row),'agent_update':{'enabled':row.get('auto_update',False),'sha256':build},'policies':row['policies'],'received':row.get('received',{}),'commands':[c for c in row['commands'] if c['status']!='completed'],
                     'acknowledged':[r['id'] for r in p['results']]}
 
     def configure(self,p):
@@ -365,19 +451,27 @@ class ClientControl:
         return {'state':'Saved','note':'Client will apply this policy at its next successful check-in. Offline clients retain their last received policy.'}
 
     def command(self,p):
-        keys(p,('account','kind'),('source','snapshot','uuid','path','confirmation','acknowledge_delete'))
-        require(p['kind'] in ('snapshot','restore','create_subvolume','delete_subvolume'),'Client command is not allowlisted')
+        keys(p,('account','kind'),('source','snapshot','uuid','path','confirmation','acknowledge_delete','mode','parent'))
+        require(p['kind'] in ('snapshot','restore','refresh_sizes','create_subvolume','delete_subvolume'),'Client command is not allowlisted')
         with self.locks.hold('client:'+p['account']):
             row=self.read(p['account']);require(row['status']=='Initialised','Finish client installation first')
             params={k:v for k,v in p.items() if k not in ('account','kind')}
-            if p['kind'] in ('snapshot','restore'):
-                keys(params,('source',) if p['kind']=='snapshot' else ('source','snapshot'))
+            if p['kind'] in ('snapshot','restore','refresh_sizes'):
+                keys(params,('source',) if p['kind']!='restore' else ('source','snapshot'),() if p['kind']!='restore' else ('mode','parent'))
                 source_id(params['source']);require(params['source'] in row['policies'],'Configure this source first')
+                if p['kind']=='refresh_sizes':require(row.get('report',{}).get('agent',{}).get('snapshot_size_refresh')==1,'Update the client agent before requesting a local size refresh')
                 if p['kind']=='restore':
                     managed_snapshot(params['snapshot'])
                     snapshot=next((s for s in row.get('received',{}).get(params['source'],{}).get('snapshots',[]) if s['name']==params['snapshot']),None)
                     require(snapshot is not None,'Select a received server snapshot')
                     params['expected_uuid']=snapshot['uuid']
+                    mode=params.get('mode','full');require(mode in ('full','incremental'),'Choose full or incremental return')
+                    if mode=='incremental':
+                        managed_snapshot(params.get('parent'))
+                        parent=next((s for s in restore_candidates(row,params['source'],params['snapshot']) if s['name']==params['parent']),None)
+                        require(parent is not None,'No recently reported compatible read-only parent; reconnect/update the client or choose full return')
+                        params.update(mode='incremental',parent_id=parent['id'],parent_uuid=parent['uuid'])
+                    else:require('parent' not in params,'A full return must not select an incremental parent')
             elif p['kind']=='create_subvolume':
                 keys(params,('uuid','path'));uuid_value(params['uuid']);relative_path(params['path'])
                 require(any(i['uuid']==params['uuid'] for i in row['inventory']),'Select a reported filesystem')
@@ -399,6 +493,8 @@ class ClientControl:
 
     def remove(self,p):
         keys(p,('account','confirmation'));row=self.read(p['account'])
+        from .snapshot_browse import active
+        require(not active(row),'Close the snapshot browsing mount before removing this client')
         require(p['confirmation']=='REMOVE '+row['account'],'Type the exact client removal confirmation')
         with self.locks.hold('client:'+row['account']):
             row.update(control_hash=None,bootstrap_hash=None,status='Revoked; account cleanup required')
@@ -410,7 +506,11 @@ class ClientControl:
     def migration_records(self):
         rows=[]
         for summary in self.summaries():
-            row=self.read(summary['account']);row.update(bootstrap_hash=None,expires_at=0,auto_update=False)
+            row=self.read(summary['account'])
+            from .snapshot_browse import active
+            require(not active(row),'Close snapshot browsing mounts before exporting system state')
+            row.pop('browse',None)
+            row.update(bootstrap_hash=None,expires_at=0,auto_update=False)
             if row['status']!='Initialised':row['status']='Enrollment must be recreated after migration'
             for task in row['commands']:
                 if task['status']!='completed':task.update(status='completed',ok=False,message='Cancelled by NAS migration; not replayed.',completed_at=int(time.time()))
@@ -430,7 +530,8 @@ class ClientControl:
                         root,_,_,_=source_root(self.config,self.db,self.locks,server,row,source)
                         with self.locks.hold('client:'+row['account']):
                             meta=self.read(row['account']);state=meta['received'][source]
-                            pins=[c['params'].get('snapshot') for c in meta['commands'] if c['status']!='completed' and c['kind']=='restore' and c['params'].get('source')==source]
+                            from .snapshot_browse import pins as browse_pins
+                            pins=restore_pins(meta['commands'],source)|browse_pins(meta,source)
                             prune(server.run,root,state,meta['policies'][source]['server_keep'],pins,lambda:self.write(row['account'],meta))
                             self.write(row['account'],meta)
                 except (Error,OSError,KeyError):continue  # Offline/busy filesystems are retried, never forced.
@@ -441,6 +542,24 @@ class ClientControl:
             except Exception:pass
             time.sleep(300)
 
+    def snapshot_size_loop(self):
+        from .snapshot_usage import measure
+        from scripts.snapshot_client import snapshot_usage_due
+        while True:
+            try:
+                worked=False
+                for summary in self.summaries():
+                    if summary['status']!='Initialised':continue
+                    for source,scope in (self.read(summary['account']).get('received') or {}).items():
+                        cached=scope.get('usage') or {}
+                        if not scope['snapshots']:continue
+                        if not snapshot_usage_due(cached,scope['snapshots'],time.time()):continue
+                        with self.locks.hold('snapshot-measure'):measure(self.config,self.db,self.locks,{'account':summary['account'],'source':source},force=False)
+                        worked=True;break
+                    if worked:break
+            except Exception:pass  # Busy/absent destinations are retried; no disk writes.
+            time.sleep(30)
+
 
 class ControlHandler(http.server.BaseHTTPRequestHandler):
     protocol_version='HTTP/1.0'
@@ -449,7 +568,7 @@ class ControlHandler(http.server.BaseHTTPRequestHandler):
         try:
             require(self.path in ('/enroll','/poll','/agent'),'Unknown client endpoint')
             require(self.headers.get('Content-Type')=='application/json' and not self.headers.get('Transfer-Encoding'),'JSON request required')
-            size=int(self.headers.get('Content-Length','0'));require(0<size<=131072,'Request is too large')
+            size=int(self.headers.get('Content-Length','0'));require(0<size<=MAX_CONTROL_REQUEST,'Request is too large')
             raw=self.rfile.read(size);require(len(raw)==size,'Incomplete client request')
             auth=self.headers.get('Authorization','');require(auth.startswith('Bearer '),'Client authentication required')
             request=json.loads(raw)
@@ -487,4 +606,7 @@ def start_listener(config,db,locks):
         context.load_cert_chain(config.get('snapshot_tls_cert','/etc/yanp-nas/tls.crt'),config.get('snapshot_tls_key','/etc/yanp-nas/tls.key'))
         server=ControlServer((config.get('snapshot_control_host','0.0.0.0'),PORT),ClientControl(config,db,locks),context)
         threading.Thread(target=server.serve_forever,daemon=True,name='snapshot-client-control').start()
-        threading.Thread(target=server.control.retention_loop,daemon=True,name='snapshot-server-retention').start();_LISTENER=server
+        threading.Thread(target=server.control.retention_loop,daemon=True,name='snapshot-server-retention').start()
+        threading.Thread(target=server.control.snapshot_size_loop,daemon=True,name='snapshot-size-estimates').start();
+        from .snapshot_browse import SnapshotBrowse
+        threading.Thread(target=SnapshotBrowse(config,db,locks).loop,daemon=True,name='snapshot-browsing').start();_LISTENER=server

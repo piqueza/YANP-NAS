@@ -15,8 +15,9 @@ def main():
     if original in ('receive','list'):request={'operation':original}
     elif len(parts)==4 and parts[0]=='receive' and re.fullmatch(r'[a-f0-9]{24}',parts[1]) and re.fullmatch(r'ynp-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{16}',parts[2]) and re.fullmatch(r'[a-fA-F0-9-]{36}',parts[3]):
         request={'operation':'receive','source':parts[1],'snapshot':parts[2],'snapshot_uuid':parts[3]}
-    elif len(parts)==3 and parts[0]=='send' and re.fullmatch(r'[a-f0-9]{24}',parts[1]) and re.fullmatch(r'ynp-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{16}',parts[2]):
+    elif len(parts) in (3,4) and parts[0]=='send' and re.fullmatch(r'[a-f0-9]{24}',parts[1]) and all(re.fullmatch(r'ynp-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{16}',s) for s in parts[2:]):
         request={'operation':'send','source':parts[1],'snapshot':parts[2]}
+        if len(parts)==4:request['parent']=parts[3]
     if request is None:
         print('This account accepts only fixed snapshot receive/list/send commands; shells, SFTP and forwarding are unavailable.',file=sys.stderr)
         return 1
